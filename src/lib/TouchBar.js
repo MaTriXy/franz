@@ -1,6 +1,6 @@
 import os from 'os';
 import semver from 'semver';
-import { remote } from 'electron';
+import { TouchBar, getCurrentWindow } from '@electron/remote';
 import { autorun } from 'mobx';
 
 import { isMac } from '../environment';
@@ -22,14 +22,17 @@ export default class FranzTouchBar {
   }
 
   _build() {
-    const currentWindow = remote.getCurrentWindow();
+    const currentWindow = getCurrentWindow();
+
+    if (this.stores.router.location.pathname.startsWith('/payment/')) {
+      return;
+    }
 
     if (this.stores.user.isLoggedIn) {
-      const { TouchBar } = remote;
       const { TouchBarButton, TouchBarSpacer } = TouchBar;
 
       const buttons = [];
-      this.stores.services.enabled.forEach(((service) => {
+      this.stores.services.allDisplayed.forEach(((service) => {
         buttons.push(new TouchBarButton({
           label: `${service.name}${service.unreadDirectMessageCount > 0
             ? ' 🔴' : ''} ${service.unreadDirectMessageCount === 0
@@ -42,7 +45,7 @@ export default class FranzTouchBar {
         }), new TouchBarSpacer({ size: 'small' }));
       }));
 
-      const touchBar = new TouchBar(buttons);
+      const touchBar = new TouchBar({ items: buttons });
       currentWindow.setTouchBar(touchBar);
     } else {
       currentWindow.setTouchBar(null);

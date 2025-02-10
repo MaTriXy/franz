@@ -1,9 +1,12 @@
 import PropTypes from 'prop-types';
+import ServiceModel from '../models/Service';
 
 export default {
   setActive: {
     serviceId: PropTypes.string.isRequired,
+    keepActiveRoute: PropTypes.bool,
   },
+  blurActive: {},
   setActiveNext: {},
   setActivePrev: {},
   showAddServiceInterface: {
@@ -32,14 +35,6 @@ export default {
     serviceId: PropTypes.string.isRequired,
     count: PropTypes.object.isRequired,
   },
-  setWebviewReference: {
-    serviceId: PropTypes.string.isRequired,
-    webview: PropTypes.object.isRequired,
-  },
-  focusService: {
-    serviceId: PropTypes.string.isRequired,
-  },
-  focusActiveService: {},
   toggleService: {
     serviceId: PropTypes.string.isRequired,
   },
@@ -62,8 +57,11 @@ export default {
   },
   reload: {
     serviceId: PropTypes.string.isRequired,
+    ignoreNavigation: PropTypes.bool,
   },
-  reloadActive: {},
+  reloadActive: {
+    ignoreNavigation: PropTypes.bool,
+  },
   reloadAll: {},
   reloadUpdatedServices: {},
   filter: {
@@ -85,4 +83,10 @@ export default {
     serviceId: PropTypes.string.isRequired,
   },
   openDevToolsForActiveService: {},
+  hibernate: {
+    serviceId: PropTypes.string.isRequired,
+  },
+  awake: {
+    serviceId: PropTypes.string.isRequired,
+  },
 };

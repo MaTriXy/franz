@@ -20,6 +20,10 @@ export default class User {
 
   @observable isSubscriptionOwner = false;
 
+  @observable hasSubscription = false;
+
+  @observable hadSubscription = false;
+
   @observable isPremium = false;
 
   @observable beta = false;
@@ -28,9 +32,10 @@ export default class User {
 
   @observable isDonor = false;
 
-  @observable isMiner = false;
-
   @observable locale = false;
+
+  @observable team = {};
+
 
   constructor(data) {
     if (!data.id) {
@@ -47,8 +52,12 @@ export default class User {
     this.beta = data.beta || this.beta;
     this.donor = data.donor || this.donor;
     this.isDonor = data.isDonor || this.isDonor;
-    this.isSubscriptionOwner = data.isSubscriptionOwner || this.isSubscriptionOwner;
-    this.isMiner = data.isMiner || this.isMiner;
     this.locale = data.locale || this.locale;
+
+    this.isSubscriptionOwner = data.isSubscriptionOwner || this.isSubscriptionOwner;
+    this.hasSubscription = data.hasSubscription || this.hasSubscription;
+    this.hadSubscription = data.hadSubscription || this.hadSubscription;
+
+    this.team = data.team || this.team;
   }
 }

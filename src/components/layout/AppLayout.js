@@ -2,16 +2,22 @@ import React, { Component } from 'react';
 import PropTypes from 'prop-types';
 import { observer, PropTypes as MobxPropTypes } from 'mobx-react';
 import { defineMessages, intlShape } from 'react-intl';
-import { TitleBar } from 'electron-react-titlebar';
+import injectSheet from 'react-jss';
 
 import InfoBar from '../ui/InfoBar';
 import { Component as DelayApp } from '../../features/delayApp';
-import { Component as BasicAuth } from '../../features/basicAuth';
 import ErrorBoundary from '../util/ErrorBoundary';
 
-// import globalMessages from '../../i18n/globalMessages';
-
-import { isWindows } from '../../environment';
+import WorkspaceSwitchingIndicator from '../../features/workspaces/components/WorkspaceSwitchingIndicator';
+import AppUpdateInfoBar from '../AppUpdateInfoBar';
+import TrialActivationInfoBar from '../TrialActivationInfoBar';
+import Todos from '../../features/todos/containers/TodosScreen';
+import TrialStatusBar from '../../features/trialStatusBar/containers/TrialStatusBarScreen';
+import WebControlsScreen from '../../features/webControls/containers/WebControlsScreen';
+import Service from '../../models/Service';
+import { workspaceStore } from '../../features/workspaces';
+import AppMenuBar from '../../features/appMenu';
+import { isMac } from '../../environment';
 
 function createMarkup(HTMLString) {
   return { __html: HTMLString };
@@ -22,21 +28,9 @@ const messages = defineMessages({
     id: 'infobar.servicesUpdated',
     defaultMessage: '!!!Your services have been updated.',
   },
-  updateAvailable: {
-    id: 'infobar.updateAvailable',
-    defaultMessage: '!!!A new update for Franz is available.',
-  },
   buttonReloadServices: {
     id: 'infobar.buttonReloadServices',
     defaultMessage: '!!!Reload services',
-  },
-  changelog: {
-    id: 'infobar.buttonChangelog',
-    defaultMessage: '!!!Changelog',
-  },
-  buttonInstallUpdate: {
-    id: 'infobar.buttonInstallUpdate',
-    defaultMessage: '!!!Restart & install update',
   },
   requiredRequestsFailed: {
     id: 'infobar.requiredRequestsFailed',
@@ -44,16 +38,24 @@ const messages = defineMessages({
   },
 });
 
-export default @observer class AppLayout extends Component {
+const styles = {
+  appContent: {
+    width: '100%',
+  },
+};
+
+@injectSheet(styles) @observer
+class AppLayout extends Component {
   static propTypes = {
-    isFullScreen: PropTypes.bool.isRequired,
+    classes: PropTypes.object.isRequired,
     sidebar: PropTypes.element.isRequired,
+    workspacesDrawer: PropTypes.element.isRequired,
     services: PropTypes.element.isRequired,
     children: PropTypes.element,
     news: MobxPropTypes.arrayOrObservableArray.isRequired,
-    // isOnline: PropTypes.bool.isRequired,
     showServicesUpdatedInfoBar: PropTypes.bool.isRequired,
     appUpdateIsDownloaded: PropTypes.bool.isRequired,
+    nextAppReleaseVersion: PropTypes.string,
     removeNewsItem: PropTypes.func.isRequired,
     reloadServicesAfterUpdate: PropTypes.func.isRequired,
     installAppUpdate: PropTypes.func.isRequired,
@@ -61,12 +63,16 @@ export default @observer class AppLayout extends Component {
     areRequiredRequestsSuccessful: PropTypes.bool.isRequired,
     retryRequiredRequests: PropTypes.func.isRequired,
     areRequiredRequestsLoading: PropTypes.bool.isRequired,
-    darkMode: PropTypes.bool.isRequired,
     isDelayAppScreenVisible: PropTypes.bool.isRequired,
+    hasActivatedTrial: PropTypes.bool.isRequired,
+    showWebControls: PropTypes.bool.isRequired,
+    activeService: PropTypes.instanceOf(Service),
   };
 
   static defaultProps = {
     children: [],
+    nextAppReleaseVersion: null,
+    activeService: null,
   };
 
   static contextTypes = {
@@ -75,14 +81,15 @@ export default @observer class AppLayout extends Component {
 
   render() {
     const {
-      isFullScreen,
+      classes,
+      workspacesDrawer,
       sidebar,
       services,
       children,
-      // isOnline,
       news,
       showServicesUpdatedInfoBar,
       appUpdateIsDownloaded,
+      nextAppReleaseVersion,
       removeNewsItem,
       reloadServicesAfterUpdate,
       installAppUpdate,
@@ -90,87 +97,95 @@ export default @observer class AppLayout extends Component {
       areRequiredRequestsSuccessful,
       retryRequiredRequests,
       areRequiredRequestsLoading,
-      darkMode,
       isDelayAppScreenVisible,
+      hasActivatedTrial,
+      showWebControls,
+      activeService,
     } = this.props;
 
     const { intl } = this.context;
 
     return (
       <ErrorBoundary>
-        <div className={(darkMode ? 'theme__dark' : '')}>
-          <div className="app">
-            {isWindows && !isFullScreen && <TitleBar menu={window.franz.menu.template} icon="assets/images/logo.svg" />}
-            <div className="app__content">
-              {sidebar}
-              <div className="app__service">
-                {news.length > 0 && news.map(item => (
-                  <InfoBar
-                    key={item.id}
-                    position="top"
-                    type={item.type}
-                    sticky={item.sticky}
-                    onHide={() => removeNewsItem({ newsId: item.id })}
-                  >
-                    <span dangerouslySetInnerHTML={createMarkup(item.message)} />
-                  </InfoBar>
-                ))}
-                {/* {!isOnline && (
-                  <InfoBar
-                    type="danger"
-                    sticky
-                  >
-                    <span className="mdi mdi-flash" />
-                    {intl.formatMessage(globalMessages.notConnectedToTheInternet)}
-                  </InfoBar>
-                )} */}
-                {!areRequiredRequestsSuccessful && showRequiredRequestsError && (
-                  <InfoBar
-                    type="danger"
-                    ctaLabel="Try again"
-                    ctaLoading={areRequiredRequestsLoading}
-                    sticky
-                    onClick={retryRequiredRequests}
-                  >
-                    <span className="mdi mdi-flash" />
-                    {intl.formatMessage(messages.requiredRequestsFailed)}
-                  </InfoBar>
-                )}
-                {showServicesUpdatedInfoBar && (
-                  <InfoBar
-                    type="primary"
-                    ctaLabel={intl.formatMessage(messages.buttonReloadServices)}
-                    onClick={reloadServicesAfterUpdate}
-                    sticky
-                  >
-                    <span className="mdi mdi-power-plug" />
-                    {intl.formatMessage(messages.servicesUpdated)}
-                  </InfoBar>
-                )}
-                {appUpdateIsDownloaded && (
-                  <InfoBar
-                    type="primary"
-                    ctaLabel={intl.formatMessage(messages.buttonInstallUpdate)}
-                    onClick={installAppUpdate}
-                    sticky
-                  >
-                    <span className="mdi mdi-information" />
-                    {intl.formatMessage(messages.updateAvailable)}
-                    {' '}
-                    <a href="https://meetfranz.com/changelog" target="_blank">
-                      <u>{intl.formatMessage(messages.changelog)}</u>
-                    </a>
-                  </InfoBar>
-                )}
-                {isDelayAppScreenVisible && (<DelayApp />)}
-                <BasicAuth />
-                {services}
-              </div>
+        {!isMac && <AppMenuBar />}
+        <div className="app">
+          <div className={`app__content ${classes.appContent}`}>
+            {workspacesDrawer}
+            {sidebar}
+            <div className="app__service">
+              {news.length > 0 && news.map(item => (
+                <InfoBar
+                  key={item.id}
+                  position="top"
+                  type={item.type}
+                  sticky={item.sticky}
+                  onHide={() => removeNewsItem({ newsId: item.id })}
+                >
+                  <span
+                    dangerouslySetInnerHTML={createMarkup(item.message)}
+                    onClick={(event) => {
+                      const { target } = event;
+                      if (target && target.hasAttribute('data-is-news-cta')) {
+                        removeNewsItem({ newsId: item.id });
+                      }
+                    }}
+                  />
+                </InfoBar>
+              ))}
+              {hasActivatedTrial && (
+                <TrialActivationInfoBar />
+              )}
+              {!areRequiredRequestsSuccessful && showRequiredRequestsError && (
+                <InfoBar
+                  type="danger"
+                  ctaLabel="Try again"
+                  ctaLoading={areRequiredRequestsLoading}
+                  sticky
+                  onClick={retryRequiredRequests}
+                >
+                  <span className="mdi mdi-flash" />
+                  {intl.formatMessage(messages.requiredRequestsFailed)}
+                </InfoBar>
+              )}
+              {showServicesUpdatedInfoBar && (
+                <InfoBar
+                  type="primary"
+                  ctaLabel={intl.formatMessage(messages.buttonReloadServices)}
+                  onClick={reloadServicesAfterUpdate}
+                  sticky
+                >
+                  <span className="mdi mdi-power-plug" />
+                  {intl.formatMessage(messages.servicesUpdated)}
+                </InfoBar>
+              )}
+              {showWebControls && activeService && (
+                <WebControlsScreen service={activeService} />
+              )}
+              {appUpdateIsDownloaded && (
+                <AppUpdateInfoBar
+                  nextAppReleaseVersion={nextAppReleaseVersion}
+                  onInstallUpdate={installAppUpdate}
+                />
+              )}
+              {isDelayAppScreenVisible ? <DelayApp /> : (
+                <>
+                  <WorkspaceSwitchingIndicator />
+                  {!workspaceStore.isSwitchingWorkspace && (
+                    <div className="app__service-size-container">
+                      {services}
+                      {children}
+                      <Todos />
+                    </div>
+                  )}
+                </>
+              )}
+              <TrialStatusBar />
             </div>
           </div>
-          {children}
         </div>
       </ErrorBoundary>
     );
   }
 }
+
+export default AppLayout;

@@ -1,11 +1,10 @@
-import { ipcRenderer, remote } from 'electron';
+import { ipcRenderer } from 'electron';
+import { session } from '@electron/remote';
 import du from 'du';
 
 import { getServicePartitionsDirectory } from '../../helpers/service-helpers.js';
 
 const debug = require('debug')('Franz:LocalApi');
-
-const { session } = remote;
 
 export default class LocalApi {
   // Settings
@@ -45,13 +44,13 @@ export default class LocalApi {
     const s = session.fromPartition(`persist:service-${serviceId}`);
 
     debug('LocalApi::clearCache resolves', serviceId);
-    return new Promise(resolve => s.clearCache(resolve));
+    return s.clearCache();
   }
 
   async clearAppCache() {
     const s = session.defaultSession;
 
     debug('LocalApi::clearCache clearAppCache');
-    return new Promise(resolve => s.clearCache(resolve));
+    return s.clearCache();
   }
 }

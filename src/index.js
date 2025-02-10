@@ -1,26 +1,49 @@
+/* eslint-disable import/first */
+
 import {
   app,
   BrowserWindow,
   shell,
   ipcMain,
+  dialog,
 } from 'electron';
-import isDevMode from 'electron-is-dev';
+
+// import isDevMode from 'electron-is-dev';
 import fs from 'fs-extra';
 import path from 'path';
 import windowStateKeeper from 'electron-window-state';
+import { enforceMacOSAppLocation } from 'electron-util';
+import * as remoteMain from '@electron/remote/main';
+import { EventEmitter } from 'events';
 
-// Set app directory before loading user modules
-if (isDevMode) {
-  app.setPath('userData', path.join(app.getPath('appData'), 'FranzDev'));
-}
+remoteMain.initialize();
 
-/* eslint-disable import/first */
 import {
   isMac,
   isWindows,
   isLinux,
 } from './environment';
-import { mainIpcHandler as basicAuthHandler } from './features/basicAuth';
+
+// Set app directory before loading user modules
+if (process.env.FRANZ_APPDATA_DIR != null) {
+  app.setPath('appData', process.env.FRANZ_APPDATA_DIR);
+  app.setPath('userData', path.join(app.getPath('appData')));
+} else if (process.platform === 'win32') {
+  app.setPath('appData', process.env.APPDATA);
+  app.setPath('userData', path.join(app.getPath('appData'), app.getName()));
+}
+
+const isDevMode = !app.isPackaged;
+
+if (isDevMode) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'FranzDev'));
+} else {
+  process.env.NODE_ENV = 'production';
+}
+
+app.commandLine.appendSwitch('disable-features', 'CrossOriginOpenerPolicy');
+app.commandLine.appendSwitch('disable-site-isolation-trials');
+
 import ipcApi from './electron/ipc-api';
 import Tray from './lib/Tray';
 import Settings from './electron/Settings';
@@ -32,16 +55,28 @@ import './electron/exception';
 import {
   DEFAULT_APP_SETTINGS,
   DEFAULT_WINDOW_OPTIONS,
+  LIVE_API_WEBSITE,
 } from './config';
 import { asarPath } from './helpers/asar-helpers';
-/* eslint-enable import/first */
+import { isValidExternalURL } from './helpers/url-helpers';
+import userAgent from './helpers/userAgent-helpers';
+import { openOverlay } from './electron/ipc-api/overlayWindow';
+import { darkThemeGrayDarker, themeGrayLightest, windowsTitleBarHeight } from './theme/default/legacy';
 
+/* eslint-enable import/first */
 const debug = require('debug')('Franz:App');
+
+// Globally set useragent to fix user agent override in service workers
+debug('Set userAgent to ', userAgent());
+app.userAgentFallback = userAgent();
 
 // Keep a global reference of the window object, if you don't, the window will
 // be closed automatically when the JavaScript object is garbage collected.
 let mainWindow;
 let willQuitApp = false;
+let overrideAppQuitForUpdate = false;
+
+export const appEvents = new EventEmitter();
 
 // Register methods to be called once the window has been loaded.
 let onDidLoadFns = [];
@@ -63,15 +98,25 @@ if (isWindows) {
   app.setAppUserModelId(appId);
 }
 
+// Initialize Settings
+const settings = new Settings('app', DEFAULT_APP_SETTINGS);
+const proxySettings = new Settings('proxy');
+
+// add `liftSingleInstanceLock` to settings.json to override the single instance lock
+const liftSingleInstanceLock = settings.get('liftSingleInstanceLock') || false;
+
 // Force single window
-const gotTheLock = app.requestSingleInstanceLock();
+const gotTheLock = liftSingleInstanceLock ? true : app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
 } else {
   app.on('second-instance', (event, argv) => {
     // Someone tried to run a second instance, we should focus our window.
     if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore();
+      }
       mainWindow.focus();
 
       if (isWindows) {
@@ -108,10 +153,6 @@ if (isLinux && ['Pantheon', 'Unity:Unity7'].indexOf(process.env.XDG_CURRENT_DESK
   process.env.XDG_CURRENT_DESKTOP = 'Unity';
 }
 
-// Initialize Settings
-const settings = new Settings('app', DEFAULT_APP_SETTINGS);
-const proxySettings = new Settings('proxy');
-
 // Disable GPU acceleration
 if (!settings.get('enableGPUAcceleration')) {
   debug('Disable GPU Acceleration');
@@ -142,17 +183,31 @@ const createWindow = () => {
     height: mainWindowState.height,
     minWidth: 600,
     minHeight: 500,
-    titleBarStyle: isMac ? 'hidden' : '',
-    frame: isLinux,
+    frame: !isMac,
     backgroundColor: !settings.get('darkMode') ? '#3498db' : '#1E1E1E',
+    titleBarStyle: 'hidden',
+    autoHideMenuBar: true,
+    titleBarOverlay: {
+      color: !settings.get('darkMode') ? themeGrayLightest : darkThemeGrayDarker,
+      symbolColor: !settings.get('darkMode') ? '#000' : '#FFF',
+      height: parseInt(windowsTitleBarHeight, 10),
+    },
     webPreferences: {
       nodeIntegration: true,
+      webviewTag: true,
+      enableRemoteModule: true,
+      contextIsolation: false,
     },
   });
+
+  remoteMain.enable(mainWindow.webContents);
 
   mainWindow.webContents.on('did-finish-load', () => {
     const fns = onDidLoadFns;
     onDidLoadFns = null;
+
+    if (!fns) return;
+
     for (const fn of fns) {
       fn(mainWindow);
     }
@@ -179,7 +234,7 @@ const createWindow = () => {
 
   // Open the DevTools.
   if (isDevMode || process.argv.includes('--devtools')) {
-    mainWindow.webContents.openDevTools();
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
   }
 
   // Windows deep linking handling on app launch
@@ -194,21 +249,26 @@ const createWindow = () => {
 
   // Emitted when the window is closed.
   mainWindow.on('close', (e) => {
+    debug('Window: close window');
     // Dereference the window object, usually you would store windows
     // in an array if your app supports multi windows, this is the time
     // when you should delete the corresponding element.
     if (!willQuitApp && (settings.get('runInBackground') === undefined || settings.get('runInBackground'))) {
       e.preventDefault();
       if (isWindows) {
+        debug('Window: minimize');
         mainWindow.minimize();
+
+        if (settings.get('minimizeToSystemTray')) {
+          debug('Skip taskbar: true');
+          mainWindow.setSkipTaskbar(true);
+        }
       } else {
+        debug('Window: hide');
         mainWindow.hide();
       }
-
-      if (isWindows) {
-        mainWindow.setSkipTaskbar(true);
-      }
-    } else {
+    } else if (!overrideAppQuitForUpdate) {
+      debug('Quitting the app');
       app.quit();
     }
   });
@@ -219,32 +279,39 @@ const createWindow = () => {
     app.wasMaximized = app.isMaximized;
 
     if (settings.get('minimizeToSystemTray')) {
+      debug('Skip taskbar: true');
       mainWindow.setSkipTaskbar(true);
       trayIcon.show();
     }
   });
 
   mainWindow.on('maximize', () => {
+    debug('Window: maximize');
     app.isMaximized = true;
   });
 
   mainWindow.on('unmaximize', () => {
+    debug('Window: unmaximize');
     app.isMaximized = false;
   });
 
   mainWindow.on('restore', () => {
+    debug('Window: restore');
     mainWindow.setSkipTaskbar(false);
 
     if (app.wasMaximized) {
+      debug('Window: was maximized before, maximize window');
       mainWindow.maximize();
     }
 
     if (!settings.get('enableSystemTray')) {
+      debug('Tray: hiding tray icon');
       trayIcon.hide();
     }
   });
 
   mainWindow.on('show', () => {
+    debug('Skip taskbar: false');
     mainWindow.setSkipTaskbar(false);
   });
 
@@ -252,15 +319,36 @@ const createWindow = () => {
   app.isMaximized = mainWindow.isMaximized();
 
   mainWindow.webContents.on('new-window', (e, url) => {
+    debug('Open url', url);
     e.preventDefault();
-    shell.openExternal(url);
+
+    if (isValidExternalURL(url)) {
+      shell.openExternal(url);
+    }
   });
 };
+
+// Allow passing command line parameters/switches to electron
+// https://electronjs.org/docs/api/chrome-command-line-switches
+// used for Kerberos support
+// Usage e.g. MACOS
+// $ Franz.app/Contents/MacOS/Franz --auth-server-whitelist *.mydomain.com --auth-negotiate-delegate-whitelist *.mydomain.com
+const argv = require('minimist')(process.argv.slice(1));
+
+if (argv['auth-server-whitelist']) {
+  app.commandLine.appendSwitch('auth-server-whitelist', argv['auth-server-whitelist']);
+}
+if (argv['auth-negotiate-delegate-whitelist']) {
+  app.commandLine.appendSwitch('auth-negotiate-delegate-whitelist', argv['auth-negotiate-delegate-whitelist']);
+}
 
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.on('ready', () => {
+  // force app to live in /Applications
+  enforceMacOSAppLocation();
+
   // Register App URL
   app.setAsDefaultProtocolClient('franz');
 
@@ -285,28 +373,45 @@ app.on('ready', () => {
   }
 
   createWindow();
+
+  if (app.runningUnderARM64Translation && isMac) {
+    dialog.showMessageBox(mainWindow, {
+      message: 'Franz for Apple Silicon',
+      detail: 'Enjoy Franz with better performance and stability on your Mac.',
+      buttons: [
+        'Later',
+        'Download Franz for Apple Silicon',
+      ],
+      defaultId: 1,
+      cancelId: 0,
+    }).then(({ response }) => {
+      if (response === 1) {
+        shell.openExternal(`${LIVE_API_WEBSITE}/download?platform=mac-arm64`);
+      }
+    });
+  }
 });
 
 // This is the worst possible implementation as the webview.webContents based callback doesn't work 🖕
 // TODO: rewrite to handle multiple login calls
 const noop = () => null;
 let authCallback = noop;
-app.on('login', (event, webContents, request, authInfo, callback) => {
+
+app.on('login', async (event, webContents, request, authInfo, callback) => {
   authCallback = callback;
   debug('browser login event', authInfo);
   event.preventDefault();
-  if (authInfo.isProxy && authInfo.scheme === 'basic') {
-    webContents.send('get-service-id');
 
-    ipcMain.once('service-id', (e, id) => {
-      debug('Received service id', id);
-
-      const ps = proxySettings.get(id);
-      callback(ps.user, ps.password);
-    });
-  } else if (authInfo.scheme === 'basic') {
+  if (!authInfo.isProxy && authInfo.scheme === 'basic') {
     debug('basic auth handler', authInfo);
-    basicAuthHandler(mainWindow, authInfo);
+
+    openOverlay(mainWindow, settings, {
+      route: `/basic-auth/${webContents.id}`,
+      query: authInfo,
+      width: 350,
+      height: 350,
+      modal: true,
+    });
   }
 });
 
@@ -331,12 +436,22 @@ app.on('window-all-closed', () => {
   // to stay active until the user quits explicitly with Cmd + Q
   if (settings.get('runInBackground') === undefined
     || settings.get('runInBackground')) {
-    app.quit();
+    debug('Window: all windows closed, quit app');
+    if (!overrideAppQuitForUpdate) {
+      app.quit();
+    }
+  } else {
+    debug('Window: don\'t quit app');
   }
 });
 
 app.on('before-quit', () => {
   willQuitApp = true;
+});
+
+appEvents.on('install-update', () => {
+  willQuitApp = true;
+  overrideAppQuitForUpdate = true;
 });
 
 app.on('activate', () => {
@@ -347,6 +462,23 @@ app.on('activate', () => {
   } else {
     mainWindow.show();
   }
+});
+
+app.on('web-contents-created', (createdEvent, contents) => {
+  // contents.on('new-window', (event, url, frameNme, disposition) => {
+  //   console.log(event, url, disposition);
+  //   if (disposition === 'foreground-tab') event.preventDefault();
+  // });
+  contents.setWindowOpenHandler(({ url, disposition }) => {
+    debug('request for opening a new window', url, disposition);
+    if ((disposition === 'foreground-tab' || disposition === 'background-tab') && isValidExternalURL(url)) {
+      shell.openExternal(url);
+    }
+
+    return {
+      action: 'deny',
+    };
+  });
 });
 
 app.on('will-finish-launching', () => {

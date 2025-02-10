@@ -1,9 +1,6 @@
 import path from 'path';
-import { remote } from 'electron';
 
-// import ServiceModel from '../models/Service';
-
-const app = remote.app;
+const { app } = process.type === 'renderer' ? require('@electron/remote') : require('electron');
 
 export function getRecipeDirectory(id = '') {
   return path.join(app.getPath('userData'), 'recipes', id);

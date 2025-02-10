@@ -1,16 +1,35 @@
+import { app, webContents } from '@electron/remote';
+import { debounce, remove } from 'lodash';
 import {
   action,
-  reaction,
   computed,
   observable,
+  reaction,
+  toJS,
 } from 'mobx';
-import { debounce, remove } from 'lodash';
+import ms from 'ms';
 
-import Store from './lib/Store';
-import Request from './lib/Request';
-import CachedRequest from './lib/CachedRequest';
+import { ipcRenderer } from 'electron';
+import { serviceLimitStore } from '../features/serviceLimit';
+import { TODOS_RECIPE_ID } from '../features/todos';
+import { workspaceStore } from '../features/workspaces';
 import { matchRoute } from '../helpers/routing-helpers';
+import { SPELLCHECKER_LOCALES } from '../i18n/languages';
+import {
+  ACTIVATE_NEXT_SERVICE, ACTIVATE_PREVIOUS_SERVICE, ACTIVATE_SERVICE,
+  HIDE_ALL_SERVICES,
+  NAVIGATE_SERVICE_TO,
+  OPEN_SERVICE_DEV_TOOLS,
+  RELOAD_SERVICE,
+  REQUEST_SERVICE_SPELLCHECKING_LANGUAGE, SERVICE_SPELLCHECKING_LANGUAGE,
+  UPDATE_SERVICE_STATE,
+  UPDATE_SPELLCHECKING_LANGUAGE,
+} from '../ipcChannels';
 import { gaEvent } from '../lib/analytics';
+import { RESTRICTION_TYPES } from '../models/Service';
+import CachedRequest from './lib/CachedRequest';
+import Request from './lib/Request';
+import Store from './lib/Store';
 
 const debug = require('debug')('Franz:ServiceStore');
 
@@ -34,6 +53,7 @@ export default class ServicesStore extends Store {
 
     // Register action handlers
     this.actions.service.setActive.listen(this._setActive.bind(this));
+    this.actions.service.blurActive.listen(this._blurActive.bind(this));
     this.actions.service.setActiveNext.listen(this._setActiveNext.bind(this));
     this.actions.service.setActivePrev.listen(this._setActivePrev.bind(this));
     this.actions.service.showAddServiceInterface.listen(this._showAddServiceInterface.bind(this));
@@ -42,11 +62,7 @@ export default class ServicesStore extends Store {
     this.actions.service.updateService.listen(this._updateService.bind(this));
     this.actions.service.deleteService.listen(this._deleteService.bind(this));
     this.actions.service.clearCache.listen(this._clearCache.bind(this));
-    this.actions.service.setWebviewReference.listen(this._setWebviewReference.bind(this));
-    this.actions.service.focusService.listen(this._focusService.bind(this));
-    this.actions.service.focusActiveService.listen(this._focusActiveService.bind(this));
     this.actions.service.toggleService.listen(this._toggleService.bind(this));
-    this.actions.service.handleIPCMessage.listen(this._handleIPCMessage.bind(this));
     this.actions.service.sendIPCMessage.listen(this._sendIPCMessage.bind(this));
     this.actions.service.sendIPCMessageToAllServices.listen(this._sendIPCMessageToAllServices.bind(this));
     this.actions.service.setUnreadMessageCount.listen(this._setUnreadMessageCount.bind(this));
@@ -63,14 +79,18 @@ export default class ServicesStore extends Store {
     this.actions.service.toggleAudio.listen(this._toggleAudio.bind(this));
     this.actions.service.openDevTools.listen(this._openDevTools.bind(this));
     this.actions.service.openDevToolsForActiveService.listen(this._openDevToolsForActiveService.bind(this));
+    this.actions.service.hibernate.listen(this._hibernate.bind(this));
+    this.actions.service.awake.listen(this._awake.bind(this));
 
     this.registerReactions([
-      this._focusServiceReaction.bind(this),
+      this._shareServiceConfigWithBrowserViewManager.bind(this),
       this._getUnreadMessageCountReaction.bind(this),
       this._mapActiveServiceToServiceModelReaction.bind(this),
       this._saveActiveService.bind(this),
       this._logoutReaction.bind(this),
       this._handleMuteSettings.bind(this),
+      this._restrictServiceAccess.bind(this),
+      this._checkForActiveService.bind(this),
     ]);
 
     // Just bind this
@@ -88,16 +108,160 @@ export default class ServicesStore extends Store {
       () => this.stores.settings.app.spellcheckerLanguage,
       () => this._shareSettingsWithServiceProcess(),
     );
+
+    ipcRenderer.on(ACTIVATE_NEXT_SERVICE, () => {
+      this.actions.service.setActiveNext();
+    });
+
+    ipcRenderer.on(ACTIVATE_PREVIOUS_SERVICE, () => {
+      this.actions.service.setActivePrev();
+    });
+
+    ipcRenderer.on(ACTIVATE_SERVICE, (e, { serviceId }) => {
+      this.actions.service.setActive({ serviceId });
+    });
+
+    ipcRenderer.on(UPDATE_SERVICE_STATE, (e, { serviceId, state }) => {
+      let service;
+      if (serviceId === TODOS_RECIPE_ID) {
+        service = this.allDisplayed.find(s => s.recipe.id === TODOS_RECIPE_ID);
+      } else {
+        service = this.one(serviceId);
+      }
+
+      if (service) {
+        Object.assign(service, state);
+      }
+    });
+
+    this._handleSpellcheckerLocale();
+    this.handleIPCMessage();
   }
 
+  initialize() {
+    super.initialize();
+
+    // Check services to become hibernated
+    this.serviceMaintenanceTick();
+  }
+
+  teardown() {
+    super.teardown();
+
+    // Stop checking services for hibernation
+    this.serviceMaintenanceTick.cancel();
+  }
+
+  handleIPCMessage() {
+    ipcRenderer.on('messages', (event, serviceId, args) => {
+      debug(`Received unread message info from '${serviceId}'`, args);
+
+      this.actions.service.setUnreadMessageCount({
+        serviceId,
+        count: {
+          direct: args.direct,
+          indirect: args.indirect,
+        },
+      });
+    });
+
+    ipcRenderer.on('hello', (event, serviceId) => {
+      debug(`Received 'hello' from '${serviceId}'`);
+    });
+
+    ipcRenderer.on('notification', (event, serviceId, args) => {
+      debug(`Received 'notification' from '${serviceId}'`);
+
+      const service = this.one(serviceId);
+
+      if (!service) {
+        console.warn(`No service with id '${serviceId}' found`);
+        return;
+      }
+
+      const { options } = args;
+      if (service.recipe.hasNotificationSound || service.isMuted || this.stores.settings.all.app.isAppMuted) {
+        Object.assign(options, {
+          silent: true,
+        });
+      }
+
+      if (service.isNotificationEnabled) {
+        const title = typeof args.title === 'string' ? args.title : service.name;
+        options.body = typeof options.body === 'string' ? options.body : '';
+
+        this.actions.app.notify({
+          notificationId: args.notificationId,
+          title,
+          options,
+          serviceId,
+        });
+      }
+    });
+
+    ipcRenderer.on('avatar', (event, serviceId, url) => {
+      debug(`Received 'avatar' from '${serviceId}'`);
+
+      const service = this.one(serviceId);
+
+      if (!service) {
+        console.warn(`No service with id '${serviceId}' found`);
+        return;
+      }
+
+      if (service.iconUrl !== url && !service.hasCustomUploadedIcon) {
+        service.customIconUrl = url;
+
+        this.actions.service.updateService({
+          serviceId,
+          serviceData: {
+            customIconUrl: url,
+          },
+          redirect: false,
+        });
+      }
+    });
+
+    ipcRenderer.on('new-window', (event, serviceId, url) => {
+      debug(`Received 'new-window' from '${serviceId}', url:`, url);
+
+      this.actions.app.openExternalUrl({ url });
+    });
+  }
+
+  /**
+   * Сheck for services to become hibernated.
+   */
+  serviceMaintenanceTick = debounce(() => {
+    this._serviceMaintenance();
+    this.serviceMaintenanceTick();
+    debug('Service maintenance tick');
+  }, ms('10s'));
+
+  /**
+   * Run various maintenance tasks on services
+   */
+  _serviceMaintenance() {
+    this.all.forEach((service) => {
+      // Defines which services should be hibernated.
+      if (!service.isActive && (Date.now() - service.lastUsed > ms('5m'))) {
+        // If service is stale for 5 min, hibernate it.
+        this._hibernate({ serviceId: service.id });
+      }
+    });
+  }
+
+  // Computed props
   @computed get all() {
     if (this.stores.user.isLoggedIn) {
       const services = this.allServicesRequest.execute().result;
       if (services) {
-        return observable(services.slice().slice().sort((a, b) => a.order - b.order));
+        return observable(services.slice().slice().sort((a, b) => a.order - b.order).map((s, index) => {
+          s.index = index;
+          return s;
+        }));
       }
     }
-
     return [];
   }
 
@@ -106,13 +270,17 @@ export default class ServicesStore extends Store {
   }
 
   @computed get allDisplayed() {
-    return this.stores.settings.all.app.showDisabledServices ? this.all : this.enabled;
+    const services = this.stores.settings.all.app.showDisabledServices ? this.all : this.enabled;
+    return workspaceStore.filterServicesByActiveWorkspace(services);
   }
 
   // This is just used to avoid unnecessary rerendering of resource-heavy webviews
   @computed get allDisplayedUnordered() {
+    const { showDisabledServices } = this.stores.settings.all.app;
+    const { keepAllWorkspacesLoaded } = this.stores.workspaces.settings;
     const services = this.allServicesRequest.execute().result || [];
-    return this.stores.settings.all.app.showDisabledServices ? services : services.filter(service => service.isEnabled);
+    const filteredServices = showDisabledServices ? services : services.filter(service => service.isEnabled);
+    return keepAllWorkspacesLoaded ? filteredServices : workspaceStore.filterServicesByActiveWorkspace(filteredServices);
   }
 
   @computed get filtered() {
@@ -137,28 +305,55 @@ export default class ServicesStore extends Store {
     return null;
   }
 
+  @computed get isTodosServiceAdded() {
+    return this.allDisplayed.find(service => service.recipe.id === TODOS_RECIPE_ID && service.isEnabled) || null;
+  }
+
+  @computed get isTodosServiceActive() {
+    return this.active && this.active.recipe.id === TODOS_RECIPE_ID;
+  }
+
   one(id) {
     return this.all.find(service => service.id === id);
   }
 
-  async _showAddServiceInterface({ recipeId }) {
-    const recipesStore = this.stores.recipes;
+  // oneByWebContentsId(id) {
+  //   return this.all.find(service => service.webContentsId === id);
+  // }
 
-    if (recipesStore.isInstalled(recipeId)) {
-      debug(`Recipe ${recipeId} is installed`);
-      this._redirectToAddServiceRoute(recipeId);
-    } else {
-      debug(`Recipe ${recipeId} is not installed`);
-      // We access the RecipeStore action directly
-      // returns Promise instead of action
-      await this.stores.recipes._install({ recipeId });
-      this._redirectToAddServiceRoute(recipeId);
-    }
+  async _showAddServiceInterface({ recipeId }) {
+    this.stores.router.push(`/settings/services/add/${recipeId}`);
   }
 
   // Actions
-  @action async _createService({ recipeId, serviceData, redirect = true }) {
-    const data = this._cleanUpTeamIdAndCustomUrl(recipeId, serviceData);
+  async _createService({
+    recipeId, serviceData, redirect = true, skipCleanup = false,
+  }) {
+    if (serviceLimitStore.userHasReachedServiceLimit) return;
+
+    if (!this.stores.recipes.isInstalled(recipeId)) {
+      debug(`Recipe "${recipeId}" is not installed, installing recipe`);
+      await this.stores.recipes._install({ recipeId });
+      debug(`Recipe "${recipeId}" installed`);
+    }
+
+    // set default values for serviceData
+    Object.assign({
+      isEnabled: true,
+      isHibernationEnabled: false,
+      isNotificationEnabled: true,
+      isBadgeEnabled: true,
+      isMuted: false,
+      customIcon: false,
+      isDarkModeEnabled: false,
+      spellcheckerLanguage: SPELLCHECKER_LOCALES[this.stores.settings.app.spellcheckerLanguage],
+    }, serviceData);
+
+    let data = serviceData;
+
+    if (!skipCleanup) {
+      data = this._cleanUpTeamIdAndCustomUrl(recipeId, serviceData);
+    }
 
     const response = await this.createServiceRequest.execute(recipeId, data)._promise;
 
@@ -285,15 +480,27 @@ export default class ServicesStore extends Store {
     gaEvent('Service', 'clear cache');
   }
 
-  @action _setActive({ serviceId }) {
+  @action _setActive({ serviceId, keepActiveRoute }) {
+    if (!keepActiveRoute) this.stores.router.push('/');
     const service = this.one(serviceId);
 
     this.all.forEach((s, index) => {
       this.all[index].isActive = false;
     });
     service.isActive = true;
+    this._awake({ serviceId: service.id });
+    service.lastUsed = Date.now();
 
-    this._focusActiveService();
+    if (this.active.recipe.id === TODOS_RECIPE_ID && !this.stores.todos.settings.isFeatureEnabledByUser) {
+      this.actions.todos.toggleTodosFeatureVisibility();
+    }
+
+    gaEvent('Service', 'activate-service', service.recipe.id);
+  }
+
+  @action _blurActive() {
+    if (!this.active) return;
+    this.active.isActive = false;
   }
 
   @action _setActiveNext() {
@@ -323,123 +530,24 @@ export default class ServicesStore extends Store {
     service.unreadIndirectMessageCount = count.indirect;
   }
 
-  @action _setWebviewReference({ serviceId, webview }) {
-    const service = this.one(serviceId);
-
-    service.webview = webview;
-
-    if (!service.isAttached) {
-      debug('Webview is not attached, initializing');
-      service.initializeWebViewEvents({
-        handleIPCMessage: this.actions.service.handleIPCMessage,
-        openWindow: this.actions.service.openWindow,
-      });
-      service.initializeWebViewListener();
-    }
-
-    service.isAttached = true;
-  }
-
-  @action _focusService({ serviceId }) {
-    const service = this.one(serviceId);
-
-    if (service.webview) {
-      if (document.activeElement) {
-        document.activeElement.blur();
-      }
-      service.webview.focus();
-    }
-  }
-
-  @action _focusActiveService() {
-    if (this.stores.user.isLoggedIn) {
-      // TODO: add checks to not focus service when router path is /settings or /auth
-      const service = this.active;
-      if (service) {
-        this._focusService({ serviceId: service.id });
-      }
-    } else {
-      this.allServicesRequest.invalidate();
-    }
-  }
-
   @action _toggleService({ serviceId }) {
     const service = this.one(serviceId);
 
     service.isEnabled = !service.isEnabled;
   }
 
-  @action _handleIPCMessage({ serviceId, channel, args }) {
-    const service = this.one(serviceId);
-
-    if (channel === 'hello') {
-      this._initRecipePolling(service.id);
-      this._initializeServiceRecipeInWebview(serviceId);
-      this._shareSettingsWithServiceProcess();
-    } else if (channel === 'messages') {
-      this.actions.service.setUnreadMessageCount({
-        serviceId,
-        count: {
-          direct: args[0].direct,
-          indirect: args[0].indirect,
-        },
-      });
-    } else if (channel === 'notification') {
-      const options = args[0].options;
-      if (service.recipe.hasNotificationSound || service.isMuted || this.stores.settings.all.app.isAppMuted) {
-        Object.assign(options, {
-          silent: true,
-        });
-      }
-
-      if (service.isNotificationEnabled) {
-        const title = typeof args[0].title === 'string' ? args[0].title : service.name;
-        options.body = typeof options.body === 'string' ? options.body : '';
-
-        this.actions.app.notify({
-          notificationId: args[0].notificationId,
-          title,
-          options,
-          serviceId,
-        });
-      }
-    } else if (channel === 'avatar') {
-      const url = args[0];
-      if (service.iconUrl !== url && !service.hasCustomUploadedIcon) {
-        service.customIconUrl = url;
-
-        this.actions.service.updateService({
-          serviceId,
-          serviceData: {
-            customIconUrl: url,
-          },
-          redirect: false,
-        });
-      }
-    } else if (channel === 'new-window') {
-      const url = args[0];
-
-      this.actions.app.openExternalUrl({ url });
-    } else if (channel === 'set-service-spellchecker-language') {
-      if (!args) {
-        console.warn('Did not receive locale');
-      } else {
-        this.actions.service.updateService({
-          serviceId,
-          serviceData: {
-            spellcheckerLanguage: args[0] === 'reset' ? '' : args[0],
-          },
-          redirect: false,
-        });
-      }
-    }
-  }
-
   @action _sendIPCMessage({ serviceId, channel, args }) {
     const service = this.one(serviceId);
 
-    if (service.webview) {
-      service.webview.send(channel, args);
+    let contents;
+    if (service.isTodos) {
+      contents = this.stores.todos.webContents;
+    } else {
+      contents = webContents.fromId(service.webContentsId);
+    }
+
+    if (contents) {
+      contents.send(channel, toJS(args));
     }
   }
 
@@ -469,21 +577,30 @@ export default class ServicesStore extends Store {
     this.actionStatus = [];
   }
 
-  @action _reload({ serviceId }) {
+  @action _reload({ serviceId, ignoreNavigation }) {
     const service = this.one(serviceId);
     if (!service.isEnabled) return;
 
     service.resetMessageCount();
+    service.lostRecipeConnection = false;
 
-    service.webview.loadURL(service.url);
+    if (service.recipe.id === TODOS_RECIPE_ID) {
+      return this.actions.todos.reload();
+    }
+
+    // `ignoreNavigation = true` does not navigate the service to `service.url`, instead an actual reload is performed
+    const ipcChannel = !ignoreNavigation ? NAVIGATE_SERVICE_TO : RELOAD_SERVICE;
+
+    ipcRenderer.send(ipcChannel, { serviceId, url: service.url });
   }
 
-  @action _reloadActive() {
+  @action _reloadActive({ ignoreNavigation = false }) {
     if (this.active) {
       const service = this.one(this.active.id);
 
       this._reload({
         serviceId: service.id,
+        ignoreNavigation,
       });
     }
   }
@@ -499,8 +616,17 @@ export default class ServicesStore extends Store {
     this.actions.ui.toggleServiceUpdatedInfoBar({ visible: false });
   }
 
-  @action _reorder({ oldIndex, newIndex }) {
-    const showDisabledServices = this.stores.settings.all.app.showDisabledServices;
+  @action _reorder(params) {
+    const { workspaces } = this.stores;
+    if (workspaces.isAnyWorkspaceActive) {
+      workspaces.reorderServicesOfActiveWorkspace(params);
+    } else {
+      this._reorderService(params);
+    }
+  }
+
+  @action _reorderService({ oldIndex, newIndex }) {
+    const { showDisabledServices } = this.stores.settings.all.app;
     const oldEnabledSortIndex = showDisabledServices ? oldIndex : this.all.indexOf(this.enabled[oldIndex]);
     const newEnabledSortIndex = showDisabledServices ? newIndex : this.all.indexOf(this.enabled[newIndex]);
 
@@ -551,26 +677,93 @@ export default class ServicesStore extends Store {
 
   @action _openDevTools({ serviceId }) {
     const service = this.one(serviceId);
-
-    service.webview.openDevTools();
+    if (service.recipe.id === TODOS_RECIPE_ID) {
+      this.actions.todos.openDevTools();
+    } else {
+      ipcRenderer.send(OPEN_SERVICE_DEV_TOOLS, { serviceId });
+    }
   }
 
   @action _openDevToolsForActiveService() {
     const service = this.active;
 
     if (service) {
-      service.webview.openDevTools();
+      this._openDevTools({ serviceId: service.id });
     } else {
       debug('No service is active');
     }
   }
 
-  // Reactions
-  _focusServiceReaction() {
-    const service = this.active;
-    if (service) {
-      this.actions.service.focusService({ serviceId: service.id });
+  @action _hibernate({ serviceId }) {
+    const service = this.one(serviceId);
+    if (service.isActive || !service.isHibernationEnabled) {
+      debug('Skipping service hibernation');
+      return;
     }
+
+    debug(`Hibernate ${service.name}`);
+
+    service.isHibernating = true;
+  }
+
+  @action _awake({ serviceId }) {
+    const service = this.one(serviceId);
+    service.isHibernating = false;
+    service.liveFrom = Date.now();
+  }
+
+  @action _resetLastPollTimer({ serviceId = null }) {
+    debug(`Reset last poll timer for ${serviceId ? `service: "${serviceId}"` : 'all services'}`);
+
+    const resetTimer = (service) => {
+      service.lastPollAnswer = Date.now();
+      service.lastPoll = Date.now();
+    };
+
+    if (!serviceId) {
+      this.allDisplayed.forEach(service => resetTimer(service));
+    } else {
+      const service = this.one(serviceId);
+      if (service) {
+        resetTimer(service);
+      }
+    }
+  }
+
+  // Reactions
+  async _shareServiceConfigWithBrowserViewManager() {
+    if (this.all.length === 0) {
+      ipcRenderer.send(HIDE_ALL_SERVICES);
+    }
+
+    if (!this.stores.user.isLoggedIn || this.stores.router.location.pathname.includes(this.stores.user.BASE_ROUTE)) return;
+
+    const sharedServiceData = this.allDisplayed.filter(service => service.isEnabled).map(service => ({
+      id: service.id,
+      name: service.name,
+      url: service.url,
+      partition: service.partition,
+      state: {
+        isActive: service.isActive,
+        spellcheckerLanguage: service.spellcheckerLanguage,
+        isSpellcheckerEnabled: this.stores.settings.app.enableSpellchecking,
+        isDarkModeEnabled: service.isDarkModeEnabled,
+        team: service.team,
+        hasCustomIcon: service.hasCustomIcon,
+        isRestricted: service.isServiceAccessRestricted,
+        isHibernating: service.isHibernating,
+      },
+      recipeId: service.recipe.id,
+    }));
+
+    const data = await ipcRenderer.invoke('browserViewManager', sharedServiceData);
+    data.forEach((browserViewHandler) => {
+      const service = this.one(browserViewHandler.serviceId);
+      if (service) {
+        debug(`Setting webContentsId for ${service.name} to`, browserViewHandler.webContentsId);
+        service.webContentsId = browserViewHandler.webContentsId;
+      }
+    });
   }
 
   _saveActiveService() {
@@ -596,8 +789,8 @@ export default class ServicesStore extends Store {
   }
 
   _getUnreadMessageCountReaction() {
-    const showMessageBadgeWhenMuted = this.stores.settings.all.app.showMessageBadgeWhenMuted;
-    const showMessageBadgesEvenWhenMuted = this.stores.ui.showMessageBadgesEvenWhenMuted;
+    const { showMessageBadgeWhenMuted } = this.stores.settings.all.app;
+    const { showMessageBadgesEvenWhenMuted } = this.stores.ui;
 
     const unreadDirectMessageCount = this.allDisplayed
       .filter(s => (showMessageBadgeWhenMuted || s.isNotificationEnabled) && showMessageBadgesEvenWhenMuted && s.isBadgeEnabled)
@@ -637,7 +830,11 @@ export default class ServicesStore extends Store {
       const isMuted = isAppMuted || service.isMuted;
 
       if (isAttached) {
-        service.webview.setAudioMuted(isMuted);
+        const serviceWebContents = webContents.fromId(service.webContentsId);
+
+        if (serviceWebContents) {
+          serviceWebContents.setAudioMuted(isMuted);
+        }
       }
     });
   }
@@ -654,6 +851,8 @@ export default class ServicesStore extends Store {
     const serviceData = data;
     const recipe = this.stores.recipes.one(recipeId);
 
+    if (!recipe) return;
+
     if (recipe.hasTeamId && recipe.hasCustomUrl && data.team && data.customUrl) {
       delete serviceData.team;
     }
@@ -661,25 +860,90 @@ export default class ServicesStore extends Store {
     return serviceData;
   }
 
-  // Helper
-  _redirectToAddServiceRoute(recipeId) {
-    const route = `/settings/services/add/${recipeId}`;
-    this.stores.router.push(route);
+  _restrictServiceAccess() {
+    const { features } = this.stores.features;
+    const { userHasReachedServiceLimit, serviceLimit } = this.stores.serviceLimit;
+
+    this.allDisplayed.map((service, index) => {
+      if (userHasReachedServiceLimit) {
+        service.isServiceAccessRestricted = index >= serviceLimit;
+
+        if (service.isServiceAccessRestricted) {
+          service.restrictionType = RESTRICTION_TYPES.SERVICE_LIMIT;
+
+          debug('Restricting access to server due to service limit');
+        }
+      }
+
+      if (service.isUsingCustomUrl) {
+        service.isServiceAccessRestricted = !features.isCustomUrlIncludedInCurrentPlan;
+
+        if (service.isServiceAccessRestricted) {
+          service.restrictionType = RESTRICTION_TYPES.CUSTOM_URL;
+
+          debug('Restricting access to server due to custom url for', service.name);
+        }
+      }
+
+      return service;
+    });
   }
 
+  _checkForActiveService() {
+    if (this.stores.router.location.pathname.includes('auth/signup')) {
+      return;
+    }
+
+    if (this.allDisplayed.findIndex(service => service.isActive) === -1 && this.allDisplayed.length !== 0) {
+      debug('No active service found, setting active service to index 0');
+
+      this._setActive({ serviceId: this.allDisplayed[0].id });
+    }
+  }
+
+  _handleSpellcheckerLocale() {
+    ipcRenderer.on(UPDATE_SPELLCHECKING_LANGUAGE, (event, serviceId, { locale }) => {
+      if (!serviceId) {
+        console.warn('Did not receive service');
+      } else {
+        debug('Updating service spellchecking language to', locale);
+
+        this.actions.service.updateService({
+          serviceId,
+          serviceData: {
+            spellcheckerLanguage: locale,
+          },
+          redirect: false,
+        });
+      }
+    });
+
+    ipcRenderer.on(REQUEST_SERVICE_SPELLCHECKING_LANGUAGE, (event, { serviceId }) => {
+      debug('Requesting spellchecker locale');
+      const service = this.one(serviceId);
+
+      if (service) {
+        ipcRenderer.send(SERVICE_SPELLCHECKING_LANGUAGE, { locale: service.spellcheckerLanguage });
+      }
+    });
+  }
+
+  // Helper
   _initializeServiceRecipeInWebview(serviceId) {
     const service = this.one(serviceId);
 
     if (service.webview) {
       debug('Initialize recipe', service.recipe.id, service.name);
-      service.webview.send('initialize-recipe', service.shareWithWebview, service.recipe);
+      service.webview.send('initialize-recipe', Object.assign({
+        franzVersion: app.getVersion(),
+      }, service.shareWithWebview), service.recipe);
     }
   }
 
   _initRecipePolling(serviceId) {
     const service = this.one(serviceId);
 
-    const delay = 2000;
+    const delay = ms('2s');
 
     if (service) {
       if (service.timer !== null) {
@@ -692,6 +956,7 @@ export default class ServicesStore extends Store {
         service.webview.send('poll');
 
         service.timer = setTimeout(loop, delay);
+        service.lastPoll = Date.now();
       };
 
       loop();
@@ -700,7 +965,7 @@ export default class ServicesStore extends Store {
 
   _reorderAnalytics = debounce(() => {
     gaEvent('Service', 'order');
-  }, 5000);
+  }, ms('5s'));
 
   _wrapIndex(index, delta, size) {
     return (((index + delta) % size) + size) % size;

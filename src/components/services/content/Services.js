@@ -1,11 +1,14 @@
-import React, { Component } from 'react';
+import React, { Component, useEffect, useRef } from 'react';
 import PropTypes from 'prop-types';
-import { observer, PropTypes as MobxPropTypes } from 'mobx-react';
+import { observer } from 'mobx-react';
 import { Link } from 'react-router';
 import { defineMessages, intlShape } from 'react-intl';
+import injectSheet from 'react-jss';
 
-import Webview from './ServiceWebview';
+import { ipcRenderer } from 'electron';
 import Appear from '../../ui/effects/Appear';
+import { RESIZE_SERVICE_VIEWS } from '../../../ipcChannels';
+import ServiceView from './ServiceView';
 
 const messages = defineMessages({
   welcome: {
@@ -18,77 +21,126 @@ const messages = defineMessages({
   },
 });
 
-export default @observer class Services extends Component {
+
+const styles = {
+  container: {
+    display: 'flex',
+    flex: 1,
+
+    '&>span': {
+      display: 'block',
+      width: '100%',
+    },
+  },
+};
+
+export default @injectSheet(styles) @observer class Services extends Component {
   static propTypes = {
-    services: MobxPropTypes.arrayOrObservableArray,
-    setWebviewReference: PropTypes.func.isRequired,
-    handleIPCMessage: PropTypes.func.isRequired,
-    openWindow: PropTypes.func.isRequired,
+    hideWelcomeView: PropTypes.bool.isRequired,
+    activeService: PropTypes.object,
+    serviceCount: PropTypes.number.isRequired,
     reload: PropTypes.func.isRequired,
     openSettings: PropTypes.func.isRequired,
     update: PropTypes.func.isRequired,
+    classes: PropTypes.object.isRequired,
   };
 
   static defaultProps = {
-    services: [],
-  };
+    activeService: undefined,
+  }
 
   static contextTypes = {
     intl: intlShape,
   };
 
+  componentWillUnmount() {
+    if (this._confettiTimeout) {
+      clearTimeout(this._confettiTimeout);
+    }
+  }
+
   render() {
     const {
-      services,
-      handleIPCMessage,
-      setWebviewReference,
-      openWindow,
+      hideWelcomeView,
+      activeService,
+      serviceCount,
       reload,
       openSettings,
       update,
+      classes,
     } = this.props;
+
     const { intl } = this.context;
 
     return (
-      <div className="services">
-        {services.length === 0 && (
-          <Appear
-            timeout={1500}
-            transitionName="slideUp"
-          >
-            <div className="services__no-service">
-              <img src="./assets/images/logo.svg" alt="" />
-              <h1>{intl.formatMessage(messages.welcome)}</h1>
-              <Appear
-                timeout={300}
-                transitionName="slideUp"
-              >
-                <Link to="/settings/recipes" className="button">
-                  {intl.formatMessage(messages.getStarted)}
-                </Link>
-              </Appear>
-            </div>
-          </Appear>
+      <>
+        {serviceCount === 0 ? (
+          <>
+            {!hideWelcomeView && (
+              <div className={classes.container}>
+                <Appear
+                  timeout={1500}
+                  transitionName="slideUp"
+                >
+                  <div className="services__no-service">
+                    <img src="./assets/images/logo.svg" alt="" />
+                    <h1>{intl.formatMessage(messages.welcome)}</h1>
+                    <Appear
+                      timeout={300}
+                      transitionName="slideUp"
+                    >
+                      <Link to="/settings/recipes" className="button">
+                        {intl.formatMessage(messages.getStarted)}
+                      </Link>
+                    </Appear>
+                  </div>
+                </Appear>
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            {activeService && (
+              <ServiceView
+                key={activeService.id}
+                service={activeService}
+                reload={() => reload({ serviceId: activeService.id })}
+                edit={() => openSettings({ path: `services/edit/${activeService.id}` })}
+                enable={() => update({
+                  serviceId: activeService.id,
+                  serviceData: {
+                    isEnabled: true,
+                  },
+                  redirect: false,
+                })}
+                upgrade={() => openSettings({ path: 'user' })}
+              />
+            )}
+            <ResizeBWServiceComponent />
+          </>
         )}
-        {services.map(service => (
-          <Webview
-            key={service.id}
-            service={service}
-            handleIPCMessage={handleIPCMessage}
-            setWebviewReference={setWebviewReference}
-            openWindow={openWindow}
-            reload={() => reload({ serviceId: service.id })}
-            edit={() => openSettings({ path: `services/edit/${service.id}` })}
-            enable={() => update({
-              serviceId: service.id,
-              serviceData: {
-                isEnabled: true,
-              },
-              redirect: false,
-            })}
-          />
-        ))}
-      </div>
+      </>
     );
   }
 }
+
+const resizeObserver = new window.ResizeObserver(([element]) => {
+  const bounds = element.target.getBoundingClientRect();
+
+  ipcRenderer.send(RESIZE_SERVICE_VIEWS, {
+    width: bounds.width,
+    height: bounds.height,
+    x: bounds.x,
+    y: element.target.offsetTop,
+  });
+});
+
+const ResizeBWServiceComponent = () => {
+  const serviceContainerRef = useRef();
+
+  useEffect(() => {
+    resizeObserver.observe(serviceContainerRef.current);
+  }, [serviceContainerRef]);
+
+  return <div className="services" ref={serviceContainerRef} />;
+};

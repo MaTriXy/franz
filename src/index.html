@@ -4,6 +4,7 @@
   <title>Franz</title>
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <link rel="stylesheet" type="text/css" href="./styles/main.css" />
+  <!-- <script type="text/javascript" src="./app.js"></script> -->
   <script type="text/javascript" src="./app.js"></script>
 </head>
 <body>
@@ -17,7 +18,7 @@
     if (isDevMode) {
       const debugging = require('debug');
       debugging.enable(process.env.DEBUG);
-      
+
       const debug = debugging('Index');
 
       document.querySelector('body').classList.add('isDevMode');
@@ -34,11 +35,16 @@
           const originalReloadBehaviour = window._onLiveReloadFileChanged;
 
           window._onLiveReloadFileChanged = (file) => {
-            if (!file.path.includes('/build/webview/') && !file.path.includes('/build/index.js') && !file.path.includes('/build/electron/')) {
+            const isTodoPreloadPath = file.path.includes('/build/features/todos/preload.js');
+            if (!file.path.includes('/build/webview/') && !file.path.includes('/build/index.js') && !file.path.includes('/build/electron/') && !isTodoPreloadPath) {
               originalReloadBehaviour(file);
-            } else {              
-              if (file.path.includes('/build/webview/')) {
-                debug('Livereload: Reloading all webvies');
+            } else {
+              if (isTodoPreloadPath) {
+                debug('Livereload: Reloading all webviews');
+                const webview = document.querySelector('webview[partition="persist:todos"]');
+                if (webview) webview.reload();
+              } else if (file.path.includes('/build/webview/')) {
+                debug('Livereload: Reloading all webviews');
                 const webviews = document.querySelectorAll('webview').forEach(webview => webview.reload());
               } else {
                 debug('Livereload: skip reload as only main process files have changed');

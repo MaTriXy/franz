@@ -13,7 +13,7 @@ export default theme => ({
     display: 'flex',
   },
   modal: {
-    background: '#FFF',
+    background: theme.colorModalBackground,
     maxWidth: '90%',
     height: 'auto',
     margin: 'auto auto',
@@ -28,5 +28,6 @@ export default theme => ({
     position: 'absolute',
     top: 0,
     right: 0,
+    padding: 20,
   },
 });

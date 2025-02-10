@@ -1,25 +1,21 @@
 import { ipcRenderer } from 'electron';
 import {
-  action, computed, observable, set,
+  action, computed, observable,
 } from 'mobx';
 import localStorage from 'mobx-localstorage';
 
 import Store from './lib/Store';
 import Request from './lib/Request';
-import CachedRequest from './lib/CachedRequest';
 import { getLocale } from '../helpers/i18n-helpers';
 
 import { DEFAULT_APP_SETTINGS, FILE_SYSTEM_SETTINGS_TYPES } from '../config';
 import { SPELLCHECKER_LOCALES } from '../i18n/languages';
+import { APP_MENU_ACKNOWLEDGED_KEY } from '../features/appMenu';
 
 const debug = require('debug')('Franz:SettingsStore');
 
 export default class SettingsStore extends Store {
-  @observable appSettingsRequest = new CachedRequest(this.api.local, 'getAppSettings');
-
   @observable updateAppSettingsRequest = new Request(this.api.local, 'updateAppSettings');
-
-  fileSystemSettingsRequests = [];
 
   fileSystemSettingsTypes = FILE_SYSTEM_SETTINGS_TYPES;
 
@@ -35,14 +31,10 @@ export default class SettingsStore extends Store {
     this.actions.settings.update.listen(this._update.bind(this));
     this.actions.settings.remove.listen(this._remove.bind(this));
 
-    this.fileSystemSettingsTypes.forEach((type) => {
-      this.fileSystemSettingsRequests[type] = new CachedRequest(this.api.local, 'getAppSettings');
-    });
-
     ipcRenderer.on('appSettings', (event, resp) => {
       debug('Get appSettings resolves', resp.type, resp.data);
 
-      this._fileSystemSettingsCache[resp.type] = resp.data;
+      Object.assign(this._fileSystemSettingsCache[resp.type], resp.data);
     });
 
     this.fileSystemSettingsTypes.forEach((type) => {
@@ -51,8 +43,6 @@ export default class SettingsStore extends Store {
   }
 
   async setup() {
-    // We need to wait until `appSettingsRequest` has been executed once, otherwise we can't patch the result. If we don't wait we'd run into an issue with mobx not reacting to changes of previously not existing keys
-    await this.appSettingsRequest._promise;
     await this._migrate();
   }
 
@@ -61,21 +51,6 @@ export default class SettingsStore extends Store {
   }
 
   @computed get proxy() {
-    // // We need to provide the final data structure as mobx autoruns won't work
-    // const proxySettings = observable({});
-    // this.stores.services.all.forEach((service) => {
-    //   proxySettings[service.id] = {
-    //     isEnabled: false,
-    //     host: null,
-    //     user: null,
-    //     password: null,
-    //   };
-    // });
-
-    // debug('this._fileSystemSettingsCache.proxy', this._fileSystemSettingsCache.proxy, proxySettings);
-
-    // return Object.assign(proxySettings, this._fileSystemSettingsCache.proxy);
-
     return this._fileSystemSettingsCache.proxy || {};
   }
 
@@ -117,7 +92,7 @@ export default class SettingsStore extends Store {
         data,
       });
 
-      set(this._fileSystemSettingsCache[type], data);
+      Object.assign(this._fileSystemSettingsCache[type], data);
     }
   }
 
@@ -196,9 +171,23 @@ export default class SettingsStore extends Store {
         },
       });
     }
-  }
 
-  _getFileBasedSettings(type) {
-    ipcRenderer.send('getAppSettings', type);
+    if (!this.all.migration['5.9.2-appMenu']) {
+      if (this.stats.appStarts === 1) {
+        this.actions.settings.update({
+          type: 'app',
+          data: {
+            [APP_MENU_ACKNOWLEDGED_KEY]: true,
+          },
+        });
+      }
+
+      this.actions.settings.update({
+        type: 'migration',
+        data: {
+          '5.9.2-appMenu': true,
+        },
+      });
+    }
   }
 }

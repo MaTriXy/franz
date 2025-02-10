@@ -1,4 +1,4 @@
-import { remote } from 'electron';
+import { app } from '@electron/remote';
 import React, { Component, Fragment } from 'react';
 import PropTypes from 'prop-types';
 import { observer } from 'mobx-react';
@@ -11,6 +11,7 @@ import Select from '../../ui/Select';
 import PremiumFeatureContainer from '../../ui/PremiumFeatureContainer';
 
 import { FRANZ_TRANSLATION } from '../../../config';
+import { isMac } from '../../../environment';
 
 const messages = defineMessages({
   headline: {
@@ -81,6 +82,10 @@ const messages = defineMessages({
     id: 'settings.app.restartRequired',
     defaultMessage: '!!!Changes require restart',
   },
+  languageDisclaimer: {
+    id: 'settings.app.languageDisclaimer',
+    defaultMessage: '!!!Official translations are English & German. All other languages are community based translations.',
+  },
 });
 
 export default @observer class EditSettingsForm extends Component {
@@ -96,7 +101,9 @@ export default @observer class EditSettingsForm extends Component {
     isClearingAllCache: PropTypes.bool.isRequired,
     onClearAllCache: PropTypes.func.isRequired,
     cacheSize: PropTypes.string.isRequired,
-    isSpellcheckerPremiumFeature: PropTypes.bool.isRequired,
+    isSpellcheckerIncludedInCurrentPlan: PropTypes.bool.isRequired,
+    isWorkspaceEnabled: PropTypes.bool.isRequired,
+    isOnline: PropTypes.bool.isRequired,
   };
 
   static contextTypes = {
@@ -126,7 +133,9 @@ export default @observer class EditSettingsForm extends Component {
       isClearingAllCache,
       onClearAllCache,
       cacheSize,
-      isSpellcheckerPremiumFeature,
+      isSpellcheckerIncludedInCurrentPlan,
+      isWorkspaceEnabled,
+      isOnline,
     } = this.props;
     const { intl } = this.context;
 
@@ -158,7 +167,9 @@ export default @observer class EditSettingsForm extends Component {
             {process.platform === 'win32' && (
               <Toggle field={form.$('minimizeToSystemTray')} />
             )}
-
+            {isWorkspaceEnabled && (
+              <Toggle field={form.$('keepAllWorkspacesLoaded')} />
+            )}
             {/* Appearance */}
             <h2 id="apperance">{intl.formatMessage(messages.headlineAppearance)}</h2>
             <Toggle field={form.$('showDisabledServices')} />
@@ -169,13 +180,14 @@ export default @observer class EditSettingsForm extends Component {
             <h2 id="language">{intl.formatMessage(messages.headlineLanguage)}</h2>
             <Select field={form.$('locale')} showLabel={false} />
             <PremiumFeatureContainer
-              condition={isSpellcheckerPremiumFeature}
+              condition={!isSpellcheckerIncludedInCurrentPlan}
+              gaEventInfo={{ category: 'User', event: 'upgrade', label: 'spellchecker' }}
             >
               <Fragment>
                 <Toggle
                   field={form.$('enableSpellchecking')}
                 />
-                {form.$('enableSpellchecking').value && (
+                {!isMac && form.$('enableSpellchecking').value && (
                   <Select field={form.$('spellcheckerLanguage')} />
                 )}
               </Fragment>
@@ -226,7 +238,7 @@ export default @observer class EditSettingsForm extends Component {
                 buttonType="secondary"
                 label={intl.formatMessage(updateButtonLabelMessage)}
                 onClick={checkForUpdates}
-                disabled={isCheckingForUpdates || isUpdateAvailable}
+                disabled={isCheckingForUpdates || isUpdateAvailable || !isOnline}
                 loaded={!isCheckingForUpdates || !isUpdateAvailable}
               />
             )}
@@ -237,7 +249,11 @@ export default @observer class EditSettingsForm extends Component {
             <Toggle field={form.$('beta')} />
             {intl.formatMessage(messages.currentVersion)}
             {' '}
-            {remote.app.getVersion()}
+            {app.getVersion()}
+            <p className="settings__message">
+              <span className="mdi mdi-information" />
+              {intl.formatMessage(messages.languageDisclaimer)}
+            </p>
           </form>
         </div>
       </div>

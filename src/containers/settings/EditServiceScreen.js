@@ -9,7 +9,6 @@ import ServicesStore from '../../stores/ServicesStore';
 import SettingsStore from '../../stores/SettingsStore';
 import FeaturesStore from '../../stores/FeaturesStore';
 import Form from '../../lib/Form';
-import { gaPage } from '../../lib/analytics';
 
 import ServiceError from '../../components/settings/services/ServiceError';
 import EditServiceForm from '../../components/settings/services/EditServiceForm';
@@ -33,6 +32,10 @@ const messages = defineMessages({
   enableService: {
     id: 'settings.service.form.enableService',
     defaultMessage: '!!!Enable service',
+  },
+  enableHibernation: {
+    id: 'settings.service.form.enableHibernation',
+    defaultMessage: '!!!Enable hibernation',
   },
   enableNotification: {
     id: 'settings.service.form.enableNotification',
@@ -93,10 +96,6 @@ export default @inject('stores', 'actions') @observer class EditServiceScreen ex
     intl: intlShape,
   };
 
-  componentDidMount() {
-    gaPage('Settings/Service/Edit');
-  }
-
   onSubmit(data) {
     const { action } = this.props.router.params;
     const { recipes, services } = this.props.stores;
@@ -119,7 +118,10 @@ export default @inject('stores', 'actions') @observer class EditServiceScreen ex
 
     const {
       stores,
+      router,
     } = this.props;
+
+    const { action } = router.params;
 
     let defaultSpellcheckerLanguage = SPELLCHECKER_LOCALES[stores.settings.app.spellcheckerLanguage];
 
@@ -143,6 +145,11 @@ export default @inject('stores', 'actions') @observer class EditServiceScreen ex
         isEnabled: {
           label: intl.formatMessage(messages.enableService),
           value: service.isEnabled,
+          default: true,
+        },
+        isHibernationEnabled: {
+          label: intl.formatMessage(messages.enableHibernation),
+          value: action !== 'edit' ? recipe.autoHibernate : service.isHibernationEnabled,
           default: true,
         },
         isNotificationEnabled: {
@@ -335,8 +342,8 @@ export default @inject('stores', 'actions') @observer class EditServiceScreen ex
           onSubmit={d => this.onSubmit(d)}
           onDelete={() => this.deleteService()}
           isProxyFeatureEnabled={proxyFeature.isEnabled}
-          isProxyPremiumFeature={proxyFeature.isPremium}
-          isSpellcheckerPremiumFeature={spellcheckerFeature.isPremium}
+          isServiceProxyIncludedInCurrentPlan={proxyFeature.isIncludedInCurrentPlan}
+          isSpellcheckerIncludedInCurrentPlan={spellcheckerFeature.isIncludedInCurrentPlan}
         />
       </ErrorBoundary>
     );

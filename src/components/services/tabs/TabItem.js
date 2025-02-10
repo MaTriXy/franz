@@ -1,4 +1,6 @@
-import { remote } from 'electron';
+/* eslint-disable jsx-a11y/click-events-have-key-events */
+/* eslint-disable jsx-a11y/no-noninteractive-element-interactions */
+import { Menu, getCurrentWindow } from '@electron/remote';
 import React, { Component } from 'react';
 import { defineMessages, intlShape } from 'react-intl';
 import PropTypes from 'prop-types';
@@ -6,10 +8,9 @@ import { observer } from 'mobx-react';
 import classnames from 'classnames';
 import { SortableElement } from 'react-sortable-hoc';
 
+import { observable } from 'mobx';
 import ServiceModel from '../../../models/Service';
-import { isDevMode, ctrlKey } from '../../../environment';
-
-const { Menu } = remote;
+import { isDevMode, ctrlKey, cmdKey } from '../../../environment';
 
 const messages = defineMessages({
   reload: {
@@ -50,8 +51,7 @@ const messages = defineMessages({
   },
 });
 
-@observer
-class TabItem extends Component {
+@observer class TabItem extends Component {
   static propTypes = {
     service: PropTypes.instanceOf(ServiceModel).isRequired,
     clickHandler: PropTypes.func.isRequired,
@@ -70,6 +70,10 @@ class TabItem extends Component {
   static contextTypes = {
     intl: intlShape,
   };
+
+  @observable isPolled = false;
+
+  @observable isPollAnswered = false;
 
   render() {
     const {
@@ -97,6 +101,7 @@ class TabItem extends Component {
     }, {
       label: intl.formatMessage(messages.reload),
       click: reload,
+      accelerator: `${cmdKey}+R`,
     }, {
       label: intl.formatMessage(messages.edit),
       click: () => openSettings({
@@ -158,8 +163,9 @@ class TabItem extends Component {
           'is-disabled': !service.isEnabled,
         })}
         onClick={clickHandler}
-        onContextMenu={() => menu.popup(remote.getCurrentWindow())}
+        onContextMenu={() => menu.popup(getCurrentWindow())}
         data-tip={`${service.name} ${shortcutIndex <= 9 ? `(${ctrlKey}+${shortcutIndex})` : ''}`}
+        data-for="tabs"
       >
         <img
           src={service.icon}

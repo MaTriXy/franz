@@ -10,6 +10,7 @@ import FeaturesStore from '../../stores/FeaturesStore';
 import UIStore from '../../stores/UIStore';
 import NewsStore from '../../stores/NewsStore';
 import SettingsStore from '../../stores/SettingsStore';
+import UserStore from '../../stores/UserStore';
 import RequestStore from '../../stores/RequestStore';
 import GlobalErrorStore from '../../stores/GlobalErrorStore';
 
@@ -20,6 +21,11 @@ import Services from '../../components/services/content/Services';
 import AppLoader from '../../components/ui/AppLoader';
 
 import { state as delayAppState } from '../../features/delayApp';
+import { workspaceActions } from '../../features/workspaces/actions';
+import WorkspaceDrawer from '../../features/workspaces/components/WorkspaceDrawer';
+import { workspaceStore } from '../../features/workspaces';
+import WorkspacesStore from '../../features/workspaces/store';
+import { CUSTOM_WEBSITE_ID } from '../../features/webControls/constants';
 
 export default @inject('stores', 'actions') @observer class AppLayoutContainer extends Component {
   static defaultProps = {
@@ -36,13 +42,12 @@ export default @inject('stores', 'actions') @observer class AppLayoutContainer e
       settings,
       globalError,
       requests,
+      user,
+      workspaces,
     } = this.props.stores;
 
     const {
       setActive,
-      handleIPCMessage,
-      setWebviewReference,
-      openWindow,
       reorder,
       reload,
       toggleNotifications,
@@ -73,13 +78,22 @@ export default @inject('stores', 'actions') @observer class AppLayoutContainer e
     const isLoadingServices = services.allServicesRequest.isExecuting
       && services.allServicesRequest.isExecutingFirstTime;
 
-    if (isLoadingFeatures || isLoadingServices) {
+    if (isLoadingFeatures || isLoadingServices || workspaces.isLoadingWorkspaces) {
       return (
         <ThemeProvider theme={ui.theme}>
           <AppLoader />
         </ThemeProvider>
       );
     }
+
+    const workspacesDrawer = (
+      <WorkspaceDrawer
+        getServicesForWorkspace={workspace => (
+          workspace ? workspaceStore.getWorkspaceServices(workspace).map(s => s.name) : services.all.map(s => s.name)
+        )}
+        onUpgradeAccountClick={() => openSettings({ path: 'user' })}
+      />
+    );
 
     const sidebar = (
       <Sidebar
@@ -95,17 +109,19 @@ export default @inject('stores', 'actions') @observer class AppLayoutContainer e
         deleteService={deleteService}
         updateService={updateService}
         toggleMuteApp={toggleMuteApp}
+        toggleWorkspaceDrawer={workspaceActions.toggleWorkspaceDrawer}
+        isWorkspaceDrawerOpen={workspaceStore.isWorkspaceDrawerOpen}
         showMessageBadgeWhenMutedSetting={settings.all.app.showMessageBadgeWhenMuted}
         showMessageBadgesEvenWhenMuted={ui.showMessageBadgesEvenWhenMuted}
+        isTodosServiceActive={services.isTodosServiceActive || false}
       />
     );
 
     const servicesContainer = (
       <Services
-        services={services.allDisplayedUnordered}
-        handleIPCMessage={handleIPCMessage}
-        setWebviewReference={setWebviewReference}
-        openWindow={openWindow}
+        hideWelcomeView={ui.isAnnouncementsRouteActive}
+        activeService={services.active}
+        serviceCount={services.allDisplayed.length}
         reload={reload}
         openSettings={openSettings}
         update={updateService}
@@ -115,11 +131,12 @@ export default @inject('stores', 'actions') @observer class AppLayoutContainer e
     return (
       <ThemeProvider theme={ui.theme}>
         <AppLayout
-          isFullScreen={app.isFullScreen}
           isOnline={app.isOnline}
           showServicesUpdatedInfoBar={ui.showServicesUpdatedInfoBar}
           appUpdateIsDownloaded={app.updateStatus === app.updateStatusTypes.DOWNLOADED}
+          nextAppReleaseVersion={app.nextAppReleaseVersion}
           sidebar={sidebar}
+          workspacesDrawer={workspacesDrawer}
           services={servicesContainer}
           news={news.latest}
           removeNewsItem={hide}
@@ -130,8 +147,10 @@ export default @inject('stores', 'actions') @observer class AppLayoutContainer e
           areRequiredRequestsSuccessful={requests.areRequiredRequestsSuccessful}
           retryRequiredRequests={retryRequiredRequests}
           areRequiredRequestsLoading={requests.areRequiredRequestsLoading}
-          darkMode={settings.all.app.darkMode}
           isDelayAppScreenVisible={delayAppState.isDelayAppScreenVisible}
+          hasActivatedTrial={user.hasActivatedTrial}
+          showWebControls={services.active?.recipe.id === CUSTOM_WEBSITE_ID}
+          activeService={services.active}
         >
           {React.Children.count(children) > 0 ? children : null}
         </AppLayout>
@@ -149,8 +168,10 @@ AppLayoutContainer.wrappedComponent.propTypes = {
     ui: PropTypes.instanceOf(UIStore).isRequired,
     news: PropTypes.instanceOf(NewsStore).isRequired,
     settings: PropTypes.instanceOf(SettingsStore).isRequired,
+    user: PropTypes.instanceOf(UserStore).isRequired,
     requests: PropTypes.instanceOf(RequestStore).isRequired,
     globalError: PropTypes.instanceOf(GlobalErrorStore).isRequired,
+    workspaces: PropTypes.instanceOf(WorkspacesStore).isRequired,
   }).isRequired,
   actions: PropTypes.shape({
     service: PropTypes.shape({
@@ -158,9 +179,6 @@ AppLayoutContainer.wrappedComponent.propTypes = {
       reload: PropTypes.func.isRequired,
       toggleNotifications: PropTypes.func.isRequired,
       toggleAudio: PropTypes.func.isRequired,
-      handleIPCMessage: PropTypes.func.isRequired,
-      setWebviewReference: PropTypes.func.isRequired,
-      openWindow: PropTypes.func.isRequired,
       reloadUpdatedServices: PropTypes.func.isRequired,
       updateService: PropTypes.func.isRequired,
       deleteService: PropTypes.func.isRequired,

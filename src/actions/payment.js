@@ -4,5 +4,10 @@ export default {
   createHostedPage: {
     planId: PropTypes.string.isRequired,
   },
+  upgradeAccount: {
+    planId: PropTypes.string.isRequired,
+    onCloseWindow: PropTypes.func,
+    overrideParent: PropTypes.number,
+  },
   createDashboardUrl: {},
 };

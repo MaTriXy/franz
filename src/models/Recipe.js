@@ -2,6 +2,7 @@ import emailParser from 'address-rfc2822';
 import semver from 'semver';
 import fs from 'fs-extra';
 import path from 'path';
+import userAgent from '../helpers/userAgent-helpers';
 
 export default class Recipe {
   id = '';
@@ -35,6 +36,12 @@ export default class Recipe {
   urlInputSuffix = '';
 
   message = '';
+
+  disablewebsecurity = false;
+
+  autoHibernate = false;
+
+  partition = '';
 
   constructor(data) {
     if (!data) {
@@ -74,6 +81,12 @@ export default class Recipe {
     this.urlInputPrefix = data.config.urlInputPrefix || this.urlInputPrefix;
     this.urlInputSuffix = data.config.urlInputSuffix || this.urlInputSuffix;
 
+    this.disablewebsecurity = data.config.disablewebsecurity || this.disablewebsecurity;
+
+    this.autoHibernate = data.config.autoHibernate || this.autoHibernate;
+
+    this.partition = data.config.partition || this.partition;
+
     this.message = data.config.message || this.message;
   }
 
@@ -90,5 +103,9 @@ export default class Recipe {
 
   get hasDarkMode() {
     return fs.pathExistsSync(path.join(this.path, 'darkmode.css'));
+  }
+
+  mockUserAgent(chromless = false) {
+    return userAgent(chromless);
   }
 }

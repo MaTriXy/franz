@@ -1,21 +1,26 @@
-import { computed, observable, autorun } from 'mobx';
+import { webContents } from '@electron/remote';
+import {
+  computed, observable, autorun,
+} from 'mobx';
 import path from 'path';
 import normalizeUrl from 'normalize-url';
+import { TODOS_RECIPE_ID } from '../config';
 
-const debug = require('debug')('Franz:Service');
+export const RESTRICTION_TYPES = {
+  SERVICE_LIMIT: 0,
+  CUSTOM_URL: 1,
+};
 
 export default class Service {
   id = '';
 
   recipe = '';
 
-  webview = null;
+  _webview = null;
 
   timer = null;
 
   events = {};
-
-  @observable isAttached = false;
 
   @observable isActive = false; // Is current webview active
 
@@ -51,13 +56,29 @@ export default class Service {
 
   @observable spellcheckerLanguage = null;
 
-  @observable isFirstLoad = true;
+  @observable isFirstLoad = false;
 
-  @observable isLoading = true;
+  @observable isLoading = false;
 
   @observable isError = false;
 
   @observable errorMessage = '';
+
+  @observable isUsingCustomUrl = false;
+
+  @observable isServiceAccessRestricted = false;
+
+  @observable restrictionType = null;
+
+  @observable isHibernationEnabled = false;
+
+  @observable isHibernating = false;
+
+  @observable lastUsed = Date.now(); // timestamp
+
+  @observable chromelessUserAgent = false;
+
+  @observable webContentsId = null;
 
   constructor(data, recipe) {
     if (!data) {
@@ -102,23 +123,40 @@ export default class Service {
 
     this.spellcheckerLanguage = data.spellcheckerLanguage !== undefined ? data.spellcheckerLanguage : this.spellcheckerLanguage;
 
+    this.isHibernationEnabled = data.isHibernationEnabled !== undefined ? data.isHibernationEnabled : this.isHibernationEnabled;
+
     this.recipe = recipe;
 
     autorun(() => {
       if (!this.isEnabled) {
-        this.webview = null;
-        this.isAttached = false;
+        this.webContentsId = null;
         this.unreadDirectMessageCount = 0;
         this.unreadIndirectMessageCount = 0;
+      }
+
+      if (this.recipe.hasCustomUrl && this.customUrl) {
+        this.isUsingCustomUrl = true;
       }
     });
   }
 
   @computed get shareWithWebview() {
     return {
+      id: this.id,
       spellcheckerLanguage: this.spellcheckerLanguage,
       isDarkModeEnabled: this.isDarkModeEnabled,
+      team: this.team,
+      url: this.url,
+      hasCustomIcon: this.hasCustomIcon,
     };
+  }
+
+  @computed get isServiceInterrupted() {
+    return (this.isLoading && this.isFirstLoad) || this.hasCrashed || this.isError || this.isServiceAccessRestricted;
+  }
+
+  @computed get isAttached() {
+    return this.webContentsId !== null;
   }
 
   @computed get url() {
@@ -160,70 +198,16 @@ export default class Service {
     return path.join(this.recipe.path, 'icon.png');
   }
 
-  @computed get userAgent() {
-    let userAgent = window.navigator.userAgent;
-    if (typeof this.recipe.overrideUserAgent === 'function') {
-      userAgent = this.recipe.overrideUserAgent();
-    }
-
-    return userAgent;
+  @computed get webContents() {
+    return webContents.fromId(this.webContentsId);
   }
 
-  initializeWebViewEvents({ handleIPCMessage, openWindow }) {
-    this.webview.addEventListener('ipc-message', e => handleIPCMessage({
-      serviceId: this.id,
-      channel: e.channel,
-      args: e.args,
-    }));
-
-    this.webview.addEventListener('new-window', (event, url, frameName, options) => openWindow({
-      event,
-      url,
-      frameName,
-      options,
-    }));
-
-    this.webview.addEventListener('did-start-loading', () => {
-      this.hasCrashed = false;
-      this.isLoading = true;
-      this.isError = false;
-    });
-
-    const didLoad = () => {
-      this.isLoading = false;
-
-      if (!this.isError) {
-        this.isFirstLoad = false;
-      }
-    };
-
-    this.webview.addEventListener('did-frame-finish-load', didLoad.bind(this));
-    this.webview.addEventListener('did-navigate', didLoad.bind(this));
-
-    this.webview.addEventListener('did-fail-load', (event) => {
-      debug('Service failed to load', this.name, event);
-      if (event.isMainFrame && event.errorCode !== -21 && event.errorCode !== -3) {
-        this.isError = true;
-        this.errorMessage = event.errorDescription;
-        this.isLoading = false;
-      }
-    });
-
-    this.webview.addEventListener('crashed', () => {
-      debug('Service crashed', this.name);
-      this.hasCrashed = true;
-    });
+  @computed get partition() {
+    return this.recipe.partition || `persist:service-${this.id}`;
   }
 
-  initializeWebViewListener() {
-    if (this.webview && this.recipe.events) {
-      Object.keys(this.recipe.events).forEach((eventName) => {
-        const eventHandler = this.recipe[this.recipe.events[eventName]];
-        if (typeof eventHandler === 'function') {
-          this.webview.addEventListener(eventName, eventHandler);
-        }
-      });
-    }
+  @computed get isTodos() {
+    return this.recipe.id === TODOS_RECIPE_ID;
   }
 
   resetMessageCount() {

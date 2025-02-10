@@ -1,19 +1,23 @@
 /* eslint max-len: 0 */
 import gulp from 'gulp';
 import babel from 'gulp-babel';
-import sass from 'gulp-sass';
 import server from 'gulp-server-livereload';
 import { exec } from 'child_process';
 import dotenv from 'dotenv';
 import sassVariables from 'gulp-sass-variables';
-import { moveSync, removeSync } from 'fs-extra';
+import { removeSync } from 'fs-extra';
 import kebabCase from 'kebab-case';
 import hexRgb from 'hex-rgb';
-import path from 'path';
+import ts from 'gulp-typescript';
+import terser from 'gulp-terser';
 
 import config from './package.json';
 
 import * as rawStyleConfig from './src/theme/default/legacy.js';
+
+const tsProject = ts.createProject('./tsconfig.json');
+
+const sass = require('gulp-sass')(require('sass'));
 
 dotenv.config();
 
@@ -26,7 +30,6 @@ const paths = {
   src: 'src',
   dest: 'build',
   tmp: '.tmp',
-  dictionaries: 'dictionaries',
   package: `out/${config.version}`,
   html: {
     src: 'src/**/*.html',
@@ -41,7 +44,26 @@ const paths = {
   scripts: {
     src: 'src/**/*.js',
     dest: 'build/',
-    watch: 'src/**/*.js',
+    watch: [
+      // 'packages/**/*.js',
+      'src/**/*.js',
+    ],
+  },
+  tsScripts: {
+    src: 'src/**/*.ts',
+    dest: 'build/',
+    watch: [
+      // 'packages/**/*.js',
+      'src/**/*.ts',
+    ],
+  },
+  packages: {
+    watch: 'packages/**/*',
+    // dest: 'build/',
+    // watch: [
+    //   // 'packages/**/*.js',
+    //   'src/**/*.js',
+    // ],
   },
 };
 
@@ -74,8 +96,10 @@ export function mvSrc() {
     [
       `${paths.src}/*`,
       `${paths.src}/*/**`,
-      `!${paths.scripts.watch}`,
+      `!${paths.scripts.watch[1]}`,
       `!${paths.src}/styles/**`,
+      `!${paths.src}/**/*.js`,
+      `!${paths.src}/**/*.ts`,
     ], { since: gulp.lastRun(mvSrc) },
   )
     .pipe(gulp.dest(paths.dest));
@@ -88,6 +112,15 @@ export function mvPackageJson() {
     ],
   )
     .pipe(gulp.dest(paths.dest));
+}
+
+export function mvLernaPackages() {
+  return gulp.src(
+    [
+      'packages/**',
+    ],
+  )
+    .pipe(gulp.dest(`${paths.dest}/packages`));
 }
 
 export function html() {
@@ -109,6 +142,12 @@ export function styles() {
     .pipe(gulp.dest(paths.styles.dest));
 }
 
+export function typescript() {
+  return gulp.src(paths.tsScripts.src, { since: gulp.lastRun(typescript) })
+    .pipe(tsProject())
+    .pipe(gulp.dest(paths.tsScripts.dest));
+}
+
 export function scripts() {
   return gulp.src(paths.scripts.src, { since: gulp.lastRun(scripts) })
     .pipe(babel({
@@ -117,15 +156,25 @@ export function scripts() {
     .pipe(gulp.dest(paths.scripts.dest));
 }
 
+export function minify() {
+  return gulp.src(`${paths.dest}/**/*.js`)
+    .pipe(terser())
+    .pipe(gulp.dest(paths.dest));
+}
+
 export function watch() {
-  gulp.watch(paths.scripts.watch, scripts);
+  gulp.watch(paths.packages.watch, mvLernaPackages);
   gulp.watch(paths.styles.watch, styles);
 
   gulp.watch([
     paths.src,
     `${paths.scripts.src}`,
+    `${paths.scripts.src}`,
     `${paths.styles.src}`,
   ], mvSrc);
+
+  gulp.watch(paths.scripts.watch, scripts);
+  gulp.watch(paths.tsScripts.watch, typescript);
 }
 
 export function webserver() {
@@ -137,35 +186,23 @@ export function webserver() {
     }));
 }
 
-export function dictionaries(done) {
-  const { SPELLCHECKER_LOCALES } = require('./build/i18n/languages');
-
-  let packages = '';
-  Object.keys(SPELLCHECKER_LOCALES).forEach((key) => { packages = `${packages} hunspell-dict-${key}`; });
-
-  _shell(`npm install --prefix ${path.join(__dirname, 'temp')} ${packages}`, () => {
-    moveSync(
-      path.join(__dirname, 'temp', 'node_modules'),
-      path.join(__dirname, 'build', paths.dictionaries),
-    );
-
-    removeSync(path.join(__dirname, 'temp'));
-
-    done();
-  });
-}
-
 export function sign(done) {
   _shell(`codesign --verbose=4 --deep --strict --force --sign "${process.env.SIGNING_IDENTITY}" "${__dirname}/node_modules/electron/dist/Electron.app"`, done);
 }
 
 const build = gulp.series(
   clean,
-  gulp.parallel(mvSrc, mvPackageJson),
+  gulp.parallel(typescript, mvSrc, mvPackageJson, mvLernaPackages),
   gulp.parallel(html, scripts, styles),
-  dictionaries,
+  minify,
 );
 export { build };
 
-const dev = gulp.series(build, gulp.parallel(webserver, watch));
+const devBuild = gulp.series(
+  clean,
+  gulp.parallel(typescript, mvSrc, mvPackageJson, mvLernaPackages),
+  gulp.parallel(html, scripts, styles),
+);
+
+const dev = gulp.series(devBuild, gulp.parallel(webserver, watch));
 export { dev };

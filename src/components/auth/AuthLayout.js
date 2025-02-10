@@ -2,7 +2,6 @@ import React, { Component } from 'react';
 import PropTypes from 'prop-types';
 import { observer } from 'mobx-react';
 import { intlShape } from 'react-intl';
-import { TitleBar } from 'electron-react-titlebar';
 
 import Link from '../ui/Link';
 import InfoBar from '../ui/InfoBar';
@@ -11,6 +10,7 @@ import { oneOrManyChildElements, globalError as globalErrorPropType } from '../.
 import globalMessages from '../../i18n/globalMessages';
 
 import { isWindows } from '../../environment';
+import AppUpdateInfoBar from '../AppUpdateInfoBar';
 
 export default @observer class AuthLayout extends Component {
   static propTypes = {
@@ -21,7 +21,13 @@ export default @observer class AuthLayout extends Component {
     retryHealthCheck: PropTypes.func.isRequired,
     isHealthCheckLoading: PropTypes.bool.isRequired,
     isFullScreen: PropTypes.bool.isRequired,
-    darkMode: PropTypes.bool.isRequired,
+    nextAppReleaseVersion: PropTypes.string,
+    installAppUpdate: PropTypes.func.isRequired,
+    appUpdateIsDownloaded: PropTypes.bool.isRequired,
+  };
+
+  static defaultProps = {
+    nextAppReleaseVersion: null,
   };
 
   static contextTypes = {
@@ -37,13 +43,14 @@ export default @observer class AuthLayout extends Component {
       retryHealthCheck,
       isHealthCheckLoading,
       isFullScreen,
-      darkMode,
+      nextAppReleaseVersion,
+      installAppUpdate,
+      appUpdateIsDownloaded,
     } = this.props;
     const { intl } = this.context;
 
     return (
-      <div className={darkMode ? 'theme__dark' : ''}>
-        {isWindows && !isFullScreen && <TitleBar menu={window.franz.menu.template} icon="assets/images/logo.svg" />}
+      <>
         <div className="auth">
           {!isOnline && (
             <InfoBar
@@ -52,6 +59,12 @@ export default @observer class AuthLayout extends Component {
               <span className="mdi mdi-flash" />
               {intl.formatMessage(globalMessages.notConnectedToTheInternet)}
             </InfoBar>
+          )}
+          {appUpdateIsDownloaded && (
+            <AppUpdateInfoBar
+              nextAppReleaseVersion={nextAppReleaseVersion}
+              onInstallUpdate={installAppUpdate}
+            />
           )}
           {isOnline && !isAPIHealthy && (
             <InfoBar
@@ -76,7 +89,7 @@ export default @observer class AuthLayout extends Component {
             <img src="./assets/images/adlk.svg" alt="" />
           </Link>
         </div>
-      </div>
+      </>
     );
   }
 }

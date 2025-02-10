@@ -1,24 +1,30 @@
 import { ipcRenderer } from 'electron';
-import path from 'path';
-import { autorun, computed, observable } from 'mobx';
-import { loadModule } from 'cld3-asm';
 import { debounce } from 'lodash';
+import { autorun, observable } from 'mobx';
+import path from 'path';
 
 import RecipeWebview from './lib/RecipeWebview';
 
-import spellchecker, { switchDict, disable as disableSpellchecker, getSpellcheckerLocaleByFuzzyIdentifier } from './spellchecker';
 import { injectDarkModeStyle, isDarkModeStyleInjected, removeDarkModeStyle } from './darkmode';
-import contextMenu from './contextMenu';
+import './desktopCapturer';
 import './notifications';
+import { getSpellcheckerLocaleByFuzzyIdentifier } from './spellchecker';
 
-import { DEFAULT_APP_SETTINGS } from '../config';
+// import { DEFAULT_WEB_CONTENTS_ID } from '../config';
+import { DEFAULT_APP_SETTINGS_VANILLA } from '../configVanilla';
+import { UPDATE_SPELLCHECKING_LANGUAGE } from '../ipcChannels';
+
+// const DEFAULT_WEB_CONTENTS_ID = 1;
 
 const debug = require('debug')('Franz:Plugin');
 
+window.FranzAPI = {};
+
 class RecipeController {
+  id = null;
+
   @observable settings = {
-    overrideSpellcheckerLanguage: false,
-    app: DEFAULT_APP_SETTINGS,
+    app: DEFAULT_APP_SETTINGS_VANILLA,
     service: {
       isDarkModeEnabled: false,
       spellcheckerLanguage: '',
@@ -31,18 +37,11 @@ class RecipeController {
     'initialize-recipe': 'loadRecipeModule',
     'settings-update': 'updateAppSettings',
     'service-settings-update': 'updateServiceSettings',
-    'get-service-id': 'serviceIdEcho',
-  }
+  };
 
   constructor() {
     this.initialize();
   }
-
-  @computed get spellcheckerLanguage() {
-    return this.settings.service.spellcheckerLanguage || this.settings.app.spellcheckerLanguage;
-  }
-
-  cldIdentifier = null;
 
   async initialize() {
     Object.keys(this.ipcEvents).forEach((channel) => {
@@ -53,17 +52,11 @@ class RecipeController {
     });
 
     debug('Send "hello" to host');
-    setTimeout(() => ipcRenderer.sendToHost('hello'), 100);
-
-    this.spellcheckingProvider = await spellchecker();
-    contextMenu(
-      this.spellcheckingProvider,
-      () => this.settings.app.enableSpellchecking,
-      () => this.settings.app.spellcheckerLanguage,
-      () => this.spellcheckerLanguage,
-    );
+    setTimeout(() => ipcRenderer.send('hello'), 100);
 
     autorun(() => this.update());
+
+    this.automaticLanguageDetection();
   }
 
   loadRecipeModule(event, config, recipe) {
@@ -84,30 +77,7 @@ class RecipeController {
   }
 
   update() {
-    debug('enableSpellchecking', this.settings.app.enableSpellchecking);
     debug('isDarkModeEnabled', this.settings.service.isDarkModeEnabled);
-    debug('System spellcheckerLanguage', this.settings.app.spellcheckerLanguage);
-    debug('Service spellcheckerLanguage', this.settings.service.spellcheckerLanguage);
-
-    if (this.settings.app.enableSpellchecking) {
-      debug('Setting spellchecker language to', this.spellcheckerLanguage);
-      let { spellcheckerLanguage } = this;
-      if (spellcheckerLanguage === 'automatic') {
-        this.automaticLanguageDetection();
-        debug('Found `automatic` locale, falling back to user locale until detected', this.settings.app.locale);
-        spellcheckerLanguage = this.settings.app.locale;
-      } else if (this.cldIdentifier) {
-        this.cldIdentifier.destroy();
-      }
-      switchDict(spellcheckerLanguage);
-    } else {
-      debug('Disable spellchecker');
-      disableSpellchecker();
-
-      if (this.cldIdentifier) {
-        this.cldIdentifier.destroy();
-      }
-    }
 
     if (this.settings.service.isDarkModeEnabled) {
       debug('Enable dark mode');
@@ -126,18 +96,9 @@ class RecipeController {
     this.settings.service = Object.assign(this.settings.service, data);
   }
 
-  serviceIdEcho(event) {
-    event.sender.send('service-id', this.settings.service.id);
-  }
-
   async automaticLanguageDetection() {
-    const cldFactory = await loadModule();
-    this.cldIdentifier = cldFactory.create(0, 1000);
-
-    window.addEventListener('keyup', debounce((e) => {
+    window.addEventListener('keyup', debounce(async (e) => {
       const element = e.target;
-
-      console.log(element);
 
       if (!element) return;
 
@@ -149,19 +110,14 @@ class RecipeController {
       }
 
       // Force a minimum length to get better detection results
-      if (value.length < 30) return;
+      if (value.length < 25) return;
 
       debug('Detecting language for', value);
-      const findResult = this.cldIdentifier.findLanguage(value);
-
-      debug('Language detection result', findResult);
-
-      if (findResult.is_reliable) {
-        const spellcheckerLocale = getSpellcheckerLocaleByFuzzyIdentifier(findResult.language);
-        debug('Language detected reliably, setting spellchecker language to', spellcheckerLocale);
-        if (spellcheckerLocale) {
-          switchDict(spellcheckerLocale);
-        }
+      const locale = await ipcRenderer.invoke('detect-language', { sample: value });
+      const spellcheckerLocale = getSpellcheckerLocaleByFuzzyIdentifier(locale);
+      debug('Language detected reliably, setting spellchecker language to', spellcheckerLocale);
+      if (spellcheckerLocale) {
+        ipcRenderer.send(UPDATE_SPELLCHECKING_LANGUAGE, { locale: spellcheckerLocale });
       }
     }, 225));
   }
@@ -174,11 +130,45 @@ new RecipeController();
 // Patching window.open
 const originalWindowOpen = window.open;
 
+
 window.open = (url, frameName, features) => {
-  // We need to differentiate if the link should be opened in a popup or in the systems default browser
-  if (!frameName && !features) {
-    return ipcRenderer.sendToHost('new-window', url);
+  debug('window.open', url, frameName, features);
+  if (!url) {
+    // The service hasn't yet supplied a URL (as used in Skype).
+    // Return a new dummy window object and wait for the service to change the properties
+    const newWindow = {
+      location: {
+        href: '',
+      },
+    };
+
+    const checkInterval = setInterval(() => {
+      // Has the service changed the URL yet?
+      if (newWindow.location.href !== '') {
+        if (features) {
+          originalWindowOpen(newWindow.location.href, frameName, features);
+        } else {
+          // Open the new URL
+          ipcRenderer.send('new-window', newWindow.location.href);
+        }
+        clearInterval(checkInterval);
+      }
+    }, 0);
+
+    setTimeout(() => {
+      // Stop checking for location changes after 1 second
+      clearInterval(checkInterval);
+    }, 1000);
+
+    return newWindow;
   }
 
-  return originalWindowOpen(url, frameName, features);
+  // We need to differentiate if the link should be opened in a popup or in the systems default browser
+  if (!frameName && !features && typeof features !== 'string') {
+    return ipcRenderer.send('new-window', url);
+  }
+
+  if (url) {
+    return originalWindowOpen(url, frameName, features);
+  }
 };

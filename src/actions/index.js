@@ -11,6 +11,11 @@ import payment from './payment';
 import news from './news';
 import settings from './settings';
 import requests from './requests';
+import announcements from '../features/announcements/actions';
+import workspaces from '../features/workspaces/actions';
+import todos from '../features/todos/actions';
+import planSelection from '../features/planSelection/actions';
+import trialStatusBar from '../features/trialStatusBar/actions';
 
 const actions = Object.assign({}, {
   service,
@@ -25,4 +30,11 @@ const actions = Object.assign({}, {
   requests,
 });
 
-export default defineActions(actions, PropTypes.checkPropTypes);
+export default Object.assign(
+  defineActions(actions, PropTypes.checkPropTypes),
+  { announcements },
+  { workspaces },
+  { todos },
+  { planSelection },
+  { trialStatusBar },
+);

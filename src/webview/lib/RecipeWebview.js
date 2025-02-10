@@ -1,6 +1,7 @@
-// @flow
-const { ipcRenderer } = require('electron');
-const fs = require('fs-extra');
+import { ipcRenderer } from 'electron';
+import fs from 'fs-extra';
+
+const debug = require('debug')('Franz:Plugin:RecipeWebview');
 
 class RecipeWebview {
   constructor() {
@@ -11,7 +12,13 @@ class RecipeWebview {
 
     ipcRenderer.on('poll', () => {
       this.loopFunc();
+
+      debug('Poll event');
     });
+
+    window.FranzAPI = {
+      clearCache: RecipeWebview.clearCache,
+    };
   }
 
   loopFunc = () => null;
@@ -44,8 +51,11 @@ class RecipeWebview {
       indirect: indirect > 0 ? indirect : 0,
     };
 
-    ipcRenderer.sendToHost('messages', count);
+
+    ipcRenderer.send('messages', count);
     Object.assign(this.countCache, count);
+
+    debug('Sending badge count to host', count);
   }
 
   /**
@@ -61,7 +71,25 @@ class RecipeWebview {
       styles.innerHTML = data.toString();
 
       document.querySelector('head').appendChild(styles);
+
+      debug('Append styles', styles);
     });
+  }
+
+  /**
+   * Set the thumbnail for the service
+   *
+   * @param {int} direct      Set the count of direct messages
+   *                          eg. Slack direct mentions, or a
+   *                          message to @channel
+   * @param {int} indirect    Set a badge that defines there are
+   *                          new messages but they do not involve
+   *                          me directly to me eg. in a channel
+   */
+  setServiceIcon(url) {
+    ipcRenderer.send('avatar', url);
+
+    debug('Sending avatar url to host', url);
   }
 
   onNotify(fn) {
@@ -74,6 +102,10 @@ class RecipeWebview {
     if (typeof fn === 'function') {
       fn();
     }
+  }
+
+  static clearCache() {
+    ipcRenderer.invoke('clearServiceCache');
   }
 }
 

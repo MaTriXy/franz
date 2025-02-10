@@ -1,24 +1,22 @@
 import { action, observable, computed } from 'mobx';
 
+import { ipcRenderer } from 'electron';
 import Store from './lib/Store';
 import CachedRequest from './lib/CachedRequest';
 import Request from './lib/Request';
 import { gaEvent } from '../lib/analytics';
+import { OVERLAY_OPEN } from '../ipcChannels';
 
 export default class PaymentStore extends Store {
   @observable plansRequest = new CachedRequest(this.api.payment, 'plans');
 
   @observable createHostedPageRequest = new Request(this.api.payment, 'getHostedPage');
 
-  @observable createDashboardUrlRequest = new Request(this.api.payment, 'getDashboardUrl');
-
-  @observable ordersDataRequest = new CachedRequest(this.api.payment, 'getOrders');
-
   constructor(...args) {
     super(...args);
 
     this.actions.payment.createHostedPage.listen(this._createHostedPage.bind(this));
-    this.actions.payment.createDashboardUrl.listen(this._createDashboardUrl.bind(this));
+    this.actions.payment.upgradeAccount.listen(this._upgradeAccount.bind(this));
   }
 
   @computed get plan() {
@@ -26,10 +24,6 @@ export default class PaymentStore extends Store {
       return {};
     }
     return this.plansRequest.execute().result || {};
-  }
-
-  @computed get orders() {
-    return this.ordersDataRequest.execute().result || [];
   }
 
   @action _createHostedPage({ planId }) {
@@ -40,11 +34,28 @@ export default class PaymentStore extends Store {
     return request;
   }
 
-  @action _createDashboardUrl() {
-    const request = this.createDashboardUrlRequest.execute();
+  @action async _upgradeAccount({ planId, onCloseWindow = () => null, overrideParent = null }) {
+    let hostedPageURL = this.stores.features.features.subscribeURL;
 
-    gaEvent('Payment', 'createDashboardUrl');
+    const parsedUrl = new URL(hostedPageURL);
+    const params = new URLSearchParams(parsedUrl.search.slice(1));
 
-    return request;
+    params.set('plan', planId);
+
+    hostedPageURL = this.stores.user.getAuthURL(`${parsedUrl.origin}${parsedUrl.pathname}?${params.toString()}`);
+
+    const returnValue = await ipcRenderer.invoke(OVERLAY_OPEN, {
+      route: `/payment/${encodeURIComponent(hostedPageURL)}`,
+      modal: true,
+      width: 800,
+      overrideParent,
+    });
+
+    if (returnValue === 'closed') {
+      this.stores.user.getUserInfoRequest.invalidate({ immediately: true });
+      this.stores.features.featuresRequest.invalidate({ immediately: true });
+
+      onCloseWindow();
+    }
   }
 }
